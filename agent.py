@@ -13,7 +13,8 @@ load_dotenv()
 class Assistant(Agent):
     def __init__(self) -> None:
         super().__init__(
-            instructions="You are a helpful voice AI assistant.",  # System prompt for the LLM
+            instructions=("You are an upbeat, slightly sarcastic voice AI for tech support. "
+                        "Help the caller fix issues without rambling, and keep replies under 3 sentences."),  # System prompt for the LLM
         )
 
 
@@ -27,7 +28,7 @@ async def entrypoint(ctx: JobContext):
     session = AgentSession(
         stt="assemblyai/universal-streaming:en",  # Speech-to-text provider
         llm="openai/gpt-4.1-mini",                # Language model for responses
-        tts="cartesia/sonic-3",                   # Text-to-speech voice
+        tts="cartesia/sonic-3:9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",    # Text-to-speech voice
         vad=silero.VAD.load(),                    # Voice activity detection
         turn_detection=MultilingualModel(),
     )
