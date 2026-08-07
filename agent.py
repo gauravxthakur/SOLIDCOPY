@@ -5,6 +5,7 @@ from livekit import agents
 from livekit.agents import Agent, AgentServer, AgentSession, JobContext, room_io
 from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from livekit.agents import stt, tts, llm, inference
 
 load_dotenv()
 
@@ -26,10 +27,28 @@ server = AgentServer()
 async def entrypoint(ctx: JobContext):
     # Configure the voice pipeline with STT, LLM, TTS, and VAD providers
     session = AgentSession(
-        stt="assemblyai/universal-streaming:en",  # Speech-to-text provider
-        llm="openai/gpt-4.1-mini",                # Language model for responses
-        tts="cartesia/sonic-3:9626c31c-bec5-4cca-baa8-f8ba9e84c8bc",    # Text-to-speech voice
-        vad=silero.VAD.load(),                    # Voice activity detection
+        # LLM with fallback: OpenAI primary, Gemini backup
+        llm=llm.FallbackAdapter(
+            [
+                inference.LLM(model="openai/gpt-4.1-mini"),
+                inference.LLM(model="google/gemini-2.5-flash"),
+            ]
+        ),
+        # STT with fallback: AssemblyAI primary, Deepgram backup
+        stt=stt.FallbackAdapter(
+            [
+                inference.STT.from_model_string("assemblyai/universal-streaming:en"),
+                inference.STT.from_model_string("deepgram/nova-3"),
+            ]
+        ),
+        # TTS with fallback: Cartesia primary, Inworld backup
+        tts=tts.FallbackAdapter(
+            [
+                inference.TTS.from_model_string("cartesia/sonic-3:9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"),
+                inference.TTS.from_model_string("inworld/inworld-tts-1"),
+            ]
+        ),
+        vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
     )
 
