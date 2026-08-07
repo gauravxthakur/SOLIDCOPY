@@ -30,5 +30,15 @@ uv add "livekit-agents[turn-detector]"
 ```
 Run the below command again:
 ```bash
-uv run agent.py download-files
+uv run agent.py download-files # run only once
+uv run agent.py console
 ```
+
+## Personality
+You can change the personality of the agent by altering the system prompt and the voice.
+For the latter, choose a specific voice ID from https://docs.livekit.io/agents/models/tts/cartesia/#voices and paste it in the Cartesia model instance.
+
+## Model architecture for fallback
+LLM: OpenAI primary, Gemini backup
+STT: AssemblyAI primary, Deepgram backup
+TTS: Cartesia primary, Inworld backup
