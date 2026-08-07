@@ -17,3 +17,18 @@ LIVEKIT_API_SECRET=
 ```
 
 Copy paste the starter agent code from https://worksh.app/tutorials/livekit-voice-agent/foundations and save it as `agent.py`
+
+## Running the starter agent
+```bash
+uv run agent.py download-files # run only once
+uv run agent.py console
+```
+
+## Adding Turn Detection
+```bash
+uv add "livekit-agents[turn-detector]"
+```
+Run the below command again:
+```bash
+uv run agent.py download-files
+```
