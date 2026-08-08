@@ -51,8 +51,18 @@ class CollectConsent(AgentTask[bool]):
 class CustomerServiceAgent(Agent):
     def __init__(self):
         super().__init__(
-            instructions="You are a friendly customer service representative."
+            instructions="""
+            You are a friendly customer service representative. Help customers 
+            with general inquiries. If they ask for a manager or you can't 
+            resolve their issue, use the escalate_to_manager tool.
+            """
         )
+
+    @function_tool()
+    async def escalate_to_manager(self, context: RunContext) -> ManagerAgent:
+        """Transfer the customer to a manager when requested or when you cannot resolve their issue."""
+        return ManagerAgent(chat_ctx=self.chat_ctx), "Transferring you to a manager now."
+
 
     async def on_enter(self) -> None:
         consent = await CollectConsent(chat_ctx=self.chat_ctx)
