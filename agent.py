@@ -8,6 +8,7 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit.agents import stt, tts, llm, inference
 from livekit.agents import AgentStateChangedEvent, MetricsCollectedEvent, metrics
 from livekit.agents import function_tool, RunContext, ToolError
+from livekit.agents import mcp
 import time
 import httpx
 
@@ -20,9 +21,14 @@ load_dotenv()
 class Assistant(Agent):
     def __init__(self) -> None:
         super().__init__(
-            instructions=("You are an upbeat, slightly sarcastic voice AI for tech support. "
-                        "Help the caller fix issues without rambling, and keep replies under 3 sentences."
-                        "You can also look up the weather if asked"),  # System prompt for the LLM
+            instructions=(
+                "You are an upbeat, slightly sarcastic voice AI for tech support. "
+                "Help the caller fix issues without rambling, and keep replies under 3 sentences. "
+                "You can look up the weather if asked. You can also answer questions about "
+                "LiveKit by searching the documentation. When users ask about LiveKit "
+                "features, APIs, or how to build something, use the docs search tools "
+                "to find accurate information."
+            ),  # System prompt for the LLM
         )
 
         # The @function_tool decorator registers this method as a tool the LLM can call
@@ -108,6 +114,7 @@ async def entrypoint(ctx: JobContext):
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
         preemptive_generation=True,
+        mcp_servers=[mcp.MCPServerHTTP(url="http://docs.livekit.io/mcp"),],
     )
 
 

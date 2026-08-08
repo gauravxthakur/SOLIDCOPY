@@ -56,3 +56,8 @@ lk --version
 lk cloud auth
 lk agent create
 ```
+
+## Adding MCP Support
+```bash
+uv add "livekit-agents[mcp]"
+```
