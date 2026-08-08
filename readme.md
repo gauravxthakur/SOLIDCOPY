@@ -42,3 +42,17 @@ For the latter, choose a specific voice ID from https://docs.livekit.io/agents/m
 LLM: OpenAI primary, Gemini backup
 STT: AssemblyAI primary, Deepgram backup
 TTS: Cartesia primary, Inworld backup
+
+## Install LiveKit CLI
+```bash
+winget install LiveKit.LiveKitCLI
+```
+Restart your editor and check if it is installed:
+```bash
+lk --version
+```
+
+```bash
+lk cloud auth
+lk agent create
+```
