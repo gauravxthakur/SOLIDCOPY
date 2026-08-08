@@ -46,6 +46,18 @@ class Assistant(Agent):
         # The docstring above becomes the tool description the LLM sees
         # when deciding which tool to call
         
+        
+        # Let the user know we're working on it
+        await context.session.say("Let me search for that...")
+
+        # context.disallow_interruptions()  optional: if we want to prevent the user from interrupting an agent action
+
+        # Add a tool dynamically
+        # await agent.update_tools(agent.tools + [new_tool])
+
+        # Remove a tool
+        # await agent.update_tools(agent.tools - [old_tool])
+
         async with httpx.AsyncClient() as client:
             # First, geocode the location to get coordinates
             geo_response = await client.get(
