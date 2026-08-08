@@ -66,6 +66,28 @@ class CustomerServiceAgent(Agent):
                 instructions="Let them know you understand and will proceed without recording."
             )
 
+
+class ManagerAgent(Agent):
+    def __init__(self, chat_ctx=None):
+        super().__init__(
+            instructions="""
+            You are a customer service manager. You handle escalated issues 
+            that frontline agents couldn't resolve. Be empathetic and 
+            solution-focused. You have authority to offer refunds, credits,
+            or other accommodations.
+            """,
+            chat_ctx=chat_ctx,
+            tts="cartesia/sonic-3:6f84f4b8-58a2-430c-8c79-688dad597532",  # Different voice
+        )
+
+    async def on_enter(self) -> None:
+        await self.session.generate_reply(
+            instructions="""
+            Introduce yourself as a manager. Acknowledge that the customer 
+            asked to speak with someone senior. Ask how you can help resolve 
+            their concern.
+            """
+        )
        
 
 
