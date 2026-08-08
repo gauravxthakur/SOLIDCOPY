@@ -7,6 +7,7 @@ from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit.agents import stt, tts, llm, inference
 from livekit.agents import AgentStateChangedEvent, MetricsCollectedEvent, metrics
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ async def entrypoint(ctx: JobContext):
         ),
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
+        preemptive_generation=True,
     )
 
 
@@ -82,6 +84,15 @@ async def entrypoint(ctx: JobContext):
 
     # Fire log_usage when worker shuts down
     ctx.add_shutdown_callback(log_usage)
+
+
+    @session.on("agent_state_changed")
+    def _on_agent_state_changed(ev: AgentStateChangedEvent):
+        if ev.new_state == "speaking":
+            if last_eou_metrics:
+                # Calculate time since user finished speaking
+                elapsed = time.time() - last_eou_metrics.timestamp
+                logger.info(f"Time to first audio: {elapsed:.3f}s")
 
 
     # Start the session with noise cancellation enabled
