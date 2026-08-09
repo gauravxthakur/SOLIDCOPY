@@ -103,21 +103,9 @@ async def entrypoint(ctx: JobContext):
     # Configure the voice pipeline with STT, LLM, TTS, and VAD providers
     session = AgentSession(
 
+        stt="assemblyai/universal-streaming:en",
         llm="openai/gpt-4.1-mini",
-        # STT with fallback: AssemblyAI primary, Deepgram backup
-        stt=stt.FallbackAdapter(
-            [
-                inference.STT.from_model_string("assemblyai/universal-streaming:en"),
-                inference.STT.from_model_string("deepgram/nova-3"),
-            ]
-        ),
-        # TTS with fallback: Cartesia primary, Inworld backup
-        tts=tts.FallbackAdapter(
-            [
-                inference.TTS.from_model_string("cartesia/sonic-3"),
-                inference.TTS.from_model_string("inworld/inworld-tts-1"),
-            ]
-        ),
+        tts="cartesia/sonic-3",
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
         preemptive_generation=True,
