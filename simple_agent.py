@@ -1,5 +1,11 @@
-import logging
 import os
+from langfuse import Langfuse
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.util.types import AttributeValue
+from livekit.agents.telemetry import set_tracer_provider
+
+
+import logging
 
 from dotenv import load_dotenv
 from livekit import agents
@@ -17,43 +23,35 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# --- OpenTelemetry / Langfuse tracing setup ---
-try:
-    from opentelemetry import trace
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
-    LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL")
-    LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
 
-    tracer = None
-    _tracer_provider = None
-
-    if LANGFUSE_BASE_URL and LANGFUSE_SECRET_KEY:
-        # Langfuse accepts OTLP over HTTP — send traces to the Langfuse OTLP endpoint.
-        # Use Authorization Bearer token with the secret key.
-        otlp_endpoint = LANGFUSE_BASE_URL.rstrip("/") + "/v1/traces"
-
-        exporter = OTLPSpanExporter(
-            endpoint=otlp_endpoint,
-            headers=("Authorization", f"Bearer {LANGFUSE_SECRET_KEY}"),
+def setup_langfuse(
+    metadata: dict[str, AttributeValue] | None = None,
+    *,
+    base_url: str | None = None,
+    public_key: str | None = None,
+    secret_key: str | None = None,
+) -> TracerProvider:
+    public_key = public_key or os.getenv("LANGFUSE_PUBLIC_KEY")
+    secret_key = secret_key or os.getenv("LANGFUSE_SECRET_KEY")
+    base_url = base_url or os.getenv("LANGFUSE_BASE_URL") or os.getenv("LANGFUSE_HOST")
+    if not public_key or not secret_key or not base_url:
+        raise ValueError(
+            "LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, and LANGFUSE_BASE_URL (or LANGFUSE_HOST) must be set"
         )
+    trace_provider = TracerProvider()
+    set_tracer_provider(trace_provider, metadata=metadata)
+    Langfuse(
+        public_key=public_key,
+        secret_key=secret_key,
+        base_url=base_url,
+        tracer_provider=trace_provider,
+        should_export_span=lambda span: True,
+    )
+    return trace_provider
 
-        resource = Resource.create({"service.name": "livekit-example-agent"})
-        _tracer_provider = TracerProvider(resource=resource)
-        _tracer_provider.add_span_processor(BatchSpanProcessor(exporter))
-        trace.set_tracer_provider(_tracer_provider)
-        tracer = trace.get_tracer(__name__)
-        logger.info("Langfuse tracing enabled; sending OTLP to %s", otlp_endpoint)
-    else:
-        logger.info("Langfuse tracing not configured (missing LANGFUSE_BASE_URL or LANGFUSE_SECRET_KEY)")
-except Exception as e:
-    tracer = None
-    _tracer_provider = None
-    logger.exception("Failed to initialize OpenTelemetry/ Langfuse exporter: %s", e)
-# --- end tracing setup ---
+
+    
 
 
 # Define your agent's behavior by extending the Agent class
@@ -85,82 +83,52 @@ class Assistant(Agent):
         # The docstring above becomes the tool description the LLM sees
         # when deciding which tool to call
 
-        
+
         # Let the user know we're working on it
         await context.session.say("Let me search for that...")
 
-        # OpenTelemetry span for the weather lookup (if tracer configured)
-        if tracer:
-            span_ctx = tracer.start_as_current_span("lookup_weather", attributes={"location": location})
-        else:
-            span_ctx = None
+        # context.disallow_interruptions()  optional: if we want to prevent the user from interrupting an agent action
 
-        if span_ctx:
-            span_ctx.__enter__()
-        try:
-            # context.disallow_interruptions()  optional: if we want to prevent the user from interrupting an agent action
+        # Add a tool dynamically
+        # await agent.update_tools(agent.tools + [new_tool])
 
-            # Add a tool dynamically
-            # await agent.update_tools(agent.tools + [new_tool])
+        # Remove a tool
+        # await agent.update_tools(agent.tools - [old_tool])
 
-            # Remove a tool
-            # await agent.update_tools(agent.tools - [old_tool])
+        async with httpx.AsyncClient() as client:
+            # First, geocode the location to get coordinates
+            geo_response = await client.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params={"name": location, "count": 1}
+            )
+            geo_data = geo_response.json()
 
-            async with httpx.AsyncClient() as client:
-                # First, geocode the location to get coordinates
-                if tracer:
-                    g_span = tracer.start_as_current_span("geocoding_api")
-                else:
-                    g_span = None
+            if not geo_data.get("results"):
+                raise ToolError(f"Could not find location: {location}")
 
-                if g_span:
-                    g_span.__enter__()
-                geo_response = await client.get(
-                    "https://geocoding-api.open-meteo.com/v1/search",
-                    params={"name": location, "count": 1}
-                )
-                if g_span:
-                    g_span.__exit__(None, None, None)
-                geo_data = geo_response.json()
+            lat = geo_data["results"][0]["latitude"]
+            lon = geo_data["results"][0]["longitude"]
+            place_name = geo_data["results"][0]["name"]
 
-                if not geo_data.get("results"):
-                    raise ToolError(f"Could not find location: {location}")
-
-                lat = geo_data["results"][0]["latitude"]
-                lon = geo_data["results"][0]["longitude"]
-                place_name = geo_data["results"][0]["name"]
-
-                # Get current weather for those coordinates
-                if tracer:
-                    w_span = tracer.start_as_current_span("weather_api", attributes={"lat": lat, "lon": lon})
-                else:
-                    w_span = None
-
-                if w_span:
-                    w_span.__enter__()
-                weather_response = await client.get(
-                    "https://api.open-meteo.com/v1/forecast",
-                    params={
-                        "latitude": lat,
-                        "longitude": lon,
-                        "current": "temperature_2m,weather_code",
-                        "temperature_unit": "fahrenheit"
-                    }
-                )
-                if w_span:
-                    w_span.__exit__(None, None, None)
-                weather = weather_response.json()
-
-                # Return a dict with the weather data
-                # The LLM will use this to form a natural response
-                return {
-                    "location": place_name,
-                    "temperature_f": weather["current"]["temperature_2m"],
-                    "conditions": weather["current"]["weather_code"]
+            # Get current weather for those coordinates
+            weather_response = await client.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "current": "temperature_2m,weather_code",
+                    "temperature_unit": "fahrenheit"
                 }
-        finally:
-            if span_ctx:
-                span_ctx.__exit__(None, None, None)
+            )
+            weather = weather_response.json()
+
+            # Return a dict with the weather data
+            # The LLM will use this to form a natural response
+            return {
+                "location": place_name,
+                "temperature_f": weather["current"]["temperature_2m"],
+                "conditions": weather["current"]["weather_code"]
+            }
 
 
 server = AgentServer()
@@ -169,19 +137,18 @@ server = AgentServer()
 # The entrypoint function runs when a participant joins the room
 @server.rtc_session()
 async def entrypoint(ctx: JobContext):
-    # Start an entrypoint span for tracing if available
-    room_id = None
-    try:
-        room_obj = getattr(ctx, "room", None)
-        room_id = getattr(room_obj, "sid", None) or getattr(room_obj, "name", None) or str(room_obj)
-    except Exception:
-        room_id = str(getattr(ctx, "room", ""))
 
-    if tracer:
-        _entry_span = tracer.start_as_current_span("entrypoint", attributes={"room": room_id})
-        _entry_span.__enter__()
-    else:
-        _entry_span = None
+    trace_provider = setup_langfuse(
+        metadata={
+            "langfuse.session.id": ctx.room.name,
+        }
+    )
+    
+    async def flush_trace():
+        trace_provider.force_flush()
+    
+    ctx.add_shutdown_callback(flush_trace)
+
 
     # Configure the voice pipeline with STT, LLM, TTS, and VAD providers
     session = AgentSession(
@@ -223,17 +190,6 @@ async def entrypoint(ctx: JobContext):
     # Fire log_usage when worker shuts down
     ctx.add_shutdown_callback(log_usage)
 
-    # Ensure tracer provider is shut down so traces are flushed
-    async def _shutdown_tracer():
-        if _tracer_provider:
-            try:
-                _tracer_provider.shutdown()
-                logger.info("Tracer provider shut down")
-            except Exception:
-                logger.exception("Error shutting down tracer provider")
-
-    ctx.add_shutdown_callback(_shutdown_tracer)
-
 
     @session.on("agent_state_changed")
     def _on_agent_state_changed(ev: AgentStateChangedEvent):
@@ -255,9 +211,6 @@ async def entrypoint(ctx: JobContext):
         ),
         # record=False to disable tracking of this agent
     )
-    # Close the entrypoint span
-    if _entry_span:
-        _entry_span.__exit__(None, None, None)
 
 
 if __name__ == "__main__":
