@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "dotenv>=0.9.9",
     "httpx>=0.28.1",
     "langfuse>=4.14.4",
     "livekit-agents[cartesia,deepgram,google,mcp,openai,silero,turn-detector]~=1.3",
