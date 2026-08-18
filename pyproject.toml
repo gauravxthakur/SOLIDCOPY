@@ -14,5 +14,6 @@ dependencies = [
     "livekit-plugins-silero>=1.6.8",
     "livekit-plugins-turn-detector>=1.6.8",
     "opentelemetry-sdk>=1.44.0",
+    "pandas>=3.0.5",
     "python-dotenv>=1.2.2",
 ]

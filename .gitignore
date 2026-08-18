@@ -86,3 +86,5 @@ coverage.xml
 *.sqlite
 *.sqlite3
 *.db
+
+/metrics/traces
