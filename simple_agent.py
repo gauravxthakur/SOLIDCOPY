@@ -19,6 +19,9 @@ from livekit.agents import mcp
 import time
 import httpx
 
+
+from mcp_registry.airtable import get_airtable_toolset
+
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -158,8 +161,12 @@ async def entrypoint(ctx: JobContext):
         tts="cartesia/sonic-3",
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
-        preemptive_generation=True,
-        mcp_servers=[mcp.MCPServerHTTP(url="http://docs.livekit.io/mcp"),],
+        # preemptive_generation=True,
+        #mcp_servers=[mcp.MCPServerHTTP(url="http://docs.livekit.io/mcp"),],
+        tools=[
+            mcp.MCPToolset(id="livekit-docs", mcp_server=mcp.MCPServerHTTP(url="http://docs.livekit.io/mcp"),),
+            get_airtable_toolset(),
+        ],
     )
 
 
