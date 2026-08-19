@@ -1,6 +1,9 @@
 import asyncio
 import os
 from livekit.agents import mcp
+from dotenv import load_dotenv
+
+load_dotenv()
 
 AIRTABLE_MCP_URL = "https://mcp.airtable.com/mcp"
 
@@ -21,16 +24,17 @@ def get_airtable_toolset() -> mcp.MCPToolset:
 
 async def test_connection():
     print("Testing connection to Airtable MCP...")
+    toolset = get_airtable_toolset()
+    
     try:
-        toolset = get_airtable_toolset()
         await toolset.setup()
-        
-        tools = toolset.get_tools()
-        print(f"Success! Connected to Airtable MCP. Discovered {len(tools)} tools:")
-        for t in tools:
-            print(f" - {t.id}")
-            
-        await toolset.close()
+
+        print(f"Success! Connected to Airtable MCP.")
+        print(f"Discovered {len(toolset.tools)} tool(s):")
+
+        for tool in toolset.tools:
+            print(f" - {tool.id}")
+
     except Exception as e:
         print(f"Connection failed: {e}")
 
