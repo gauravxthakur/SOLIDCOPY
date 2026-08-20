@@ -1050,7 +1050,7 @@ requires-dist = [
     { name = "dotenv", specifier = ">=0.9.9" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "langfuse", specifier = ">=4.14.4" },
-    { name = "livekit-agents", extras = ["cartesia", "deepgram", "google", "mcp", "openai", "silero", "turn-detector"], specifier = "~=1.3" },
+    { name = "livekit-agents", extras = ["cartesia", "deepgram", "google", "mcp", "openai", "silero", "turn-detector"], specifier = "~=1.5" },
     { name = "livekit-plugins-noise-cancellation", specifier = "~=0.2" },
     { name = "livekit-plugins-openai", specifier = ">=1.6.8" },
     { name = "livekit-plugins-silero", specifier = ">=1.6.8" },

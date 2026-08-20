@@ -164,8 +164,9 @@ async def entrypoint(ctx: JobContext):
         # preemptive_generation=True,
         #mcp_servers=[mcp.MCPServerHTTP(url="http://docs.livekit.io/mcp"),],
         tools=[
+            mcp.MCPToolset(id="airtable", mcp_server=mcp.MCPServerHTTP("https://mcp.airtable.com/mcp"), headers={"Authorization":f"Bearer {os.getenv("AIRTABLE_PAT")}"}),
             mcp.MCPToolset(id="livekit-docs", mcp_server=mcp.MCPServerHTTP(url="http://docs.livekit.io/mcp"),),
-            get_airtable_toolset(),
+            #get_airtable_toolset(),
         ],
     )
 
