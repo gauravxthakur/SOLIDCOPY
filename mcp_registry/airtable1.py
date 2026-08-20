@@ -44,3 +44,27 @@ def get_airtable_toolset() -> mcp.MCPToolset:
             tool_result_resolver=airtable_result_resolver,
         ),
     )
+
+
+async def test_connection():
+    """Standalone test script to verify connection and tool discovery."""
+    print("Testing connection to Airtable MCP with custom resolver...")
+    toolset = get_airtable_toolset()
+
+    try:
+        await toolset.setup()
+        print("Success! Connected to Airtable MCP.")
+        print(f"Discovered {len(toolset.tools)} tool(s):")
+
+        for tool in toolset.tools:
+            print(f" - {tool.id}")
+
+    except Exception as e:
+        print(f"Connection failed: {e}")
+    finally:
+        await toolset.aclose()
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(test_connection())
