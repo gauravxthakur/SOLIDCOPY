@@ -20,9 +20,6 @@ import time
 import httpx
 
 
-#from mcp_registry.airtable import get_airtable_toolset
-from mcp_registry.airtable1 import get_airtable_toolset
-
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -69,7 +66,6 @@ class Assistant(Agent):
                 "LiveKit by searching the documentation. When users ask about LiveKit "
                 "features, APIs, or how to build something, use the docs search tools "
                 "to find accurate information."
-                "You can also use the airtable tools to look up information about customers, and their bookings."
             ),  # System prompt for the LLM
         )
 
@@ -105,7 +101,7 @@ async def entrypoint(ctx: JobContext):
         #mcp_servers=[mcp.MCPServerHTTP(url="http://docs.livekit.io/mcp"),],
         tools=[
             mcp.MCPToolset(id="livekit-docs", mcp_server=mcp.MCPServerHTTP(url="http://docs.livekit.io/mcp"),),
-            get_airtable_toolset(),
+            #get_airtable_toolset(),
         ],
     )
 
