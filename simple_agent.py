@@ -16,6 +16,7 @@ from livekit.agents import stt, tts, llm, inference
 from livekit.agents import AgentStateChangedEvent, MetricsCollectedEvent, metrics
 from livekit.agents import function_tool, RunContext, ToolError
 from livekit.agents import mcp
+from metrics.analyzer import SessionMetricsAccumulator
 import time
 import httpx
 
@@ -76,6 +77,8 @@ server = AgentServer()
 # The entrypoint function runs when a participant joins the room
 @server.rtc_session()
 async def entrypoint(ctx: JobContext):
+
+    session_metrics = SessionMetricsAccumulator()
 
     trace_provider = setup_langfuse(
         metadata={
