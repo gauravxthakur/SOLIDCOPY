@@ -16,6 +16,8 @@ from livekit.agents import stt, tts, llm, inference
 from livekit.agents import AgentStateChangedEvent, MetricsCollectedEvent, metrics
 from livekit.agents import function_tool, RunContext, ToolError
 from livekit.agents import mcp
+from metrics.analyzer import SessionMetricsAccumulator, format_summary
+import json
 import time
 import httpx
 
@@ -77,6 +79,8 @@ server = AgentServer()
 @server.rtc_session()
 async def entrypoint(ctx: JobContext):
 
+    session_metrics = SessionMetricsAccumulator()
+
     trace_provider = setup_langfuse(
         metadata={
             "langfuse.session.id": ctx.room.name,
@@ -111,23 +115,31 @@ async def entrypoint(ctx: JobContext):
 
     # Track End of Utterance timing (when turn detector decides user finished speaking)
     last_eou_metrics: metrics.EOUMetrics | None = None
+    summary_logged = False
 
     @session.on("metrics_collected")
     def _on_metrics_collected(ev: MetricsCollectedEvent):
         nonlocal last_eou_metrics
-        # Capture EOU metrics for TTFA calculation
+
         if ev.metrics.type == "eou_metrics":
             last_eou_metrics = ev.metrics
 
-        # Log each metric as it arrives and add to usage collector
-        metrics.log_metrics(ev.metrics)
         usage_collector.collect(ev.metrics)
+        session_metrics.collect(ev.metrics)
 
 
-    async def log_usage():
-        # Print per-session summary (tokens, audio duration, costs)
-        summary = usage_collector.get_summary()
-        logger.info("Usage summary: %s", summary)
+    async def log_usage(reason: str = "shutdown") -> None:
+        # Exactly once per entrypoint: duplicate prints were from dual log handlers,
+        # not double calculation — still guard against re-entrant shutdown.
+        nonlocal summary_logged
+        if summary_logged:
+            logger.debug("Skipping duplicate session metrics summary (reason=%s)", reason)
+            return
+        summary_logged = True
+
+        session_summary = session_metrics.summary()
+        logger.info("\n%s", format_summary(session_summary))
+        logger.info("Session metrics JSON: %s", json.dumps(session_summary))
 
 
     # Fire log_usage when worker shuts down
@@ -157,5 +169,7 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    # Do not call logging.basicConfig here: LiveKit's CLI attaches its own root
+    # handler. basicConfig would add a second StreamHandler and print every
+    # shutdown log twice in two different formats.
     agents.cli.run_app(server)
