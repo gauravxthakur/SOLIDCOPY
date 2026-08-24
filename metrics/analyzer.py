@@ -236,6 +236,7 @@ class SessionMetricsAccumulator:
             },
             "stt": {
                 "metric_event_count": self.stt_metric_events,
+                "utterance_count": None,
                 "audio_duration_seconds": self.stt_audio_duration.summary(),
                 "duration_seconds": self.stt_duration.summary(),
                 "models": dict(self.stt_models),
