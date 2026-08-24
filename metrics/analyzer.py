@@ -280,11 +280,77 @@ class SessionMetricsAccumulator:
         }
 
 
+def _fmt_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "n/a"
+    total = int(round(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _fmt_num(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, float):
+        return f"{value:,.2f}" if abs(value) >= 10 else f"{value:.2f}".rstrip("0").rstrip(".")
+    if isinstance(value, int):
+        return f"{value:,}"
+    return str(value)
+
+
+def _avg(stats: dict[str, Any] | None) -> Any:
+    return None if not isinstance(stats, dict) else stats.get("average")
+
+
+def _total(stats: dict[str, Any] | None) -> Any:
+    return None if not isinstance(stats, dict) else stats.get("total")
+
+
 def format_summary(summary: dict[str, Any]) -> str:
     """Return a compact, readable representation of a session summary."""
-    lines = ["SESSION METRICS SUMMARY"]
-    for category, values in summary.items():
-        lines.append(f"\n{category.upper()}")
-        for name, value in values.items():
-            lines.append(f"  {name}: {value}")
+    session = summary.get("session", {})
+    events = summary.get("events", {})
+    llm = summary.get("llm", {})
+    tts = summary.get("tts", {})
+    stt = summary.get("stt", {})
+    eou = summary.get("eou", {})
+    turns = summary.get("turns", {})
+    interruptions = summary.get("interruptions", {})
+    tools = summary.get("tools", {})
+
+    lines = [
+        "SESSION METRICS SUMMARY",
+        f"Session duration: {_fmt_duration(session.get('duration_seconds'))}",
+        f"Metric events: {_fmt_num(events.get('metric_event_count'))}",
+        "",
+        "LLM",
+        f"  Requests: {_fmt_num(llm.get('request_count'))}",
+        f"  Prompt tokens: {_fmt_num(llm.get('prompt_tokens'))}",
+        f"  Cached prompt tokens: {_fmt_num(llm.get('cached_prompt_tokens'))}",
+        f"  Completion tokens: {_fmt_num(llm.get('completion_tokens'))}",
+        f"  Average TTFT: {_fmt_num(_avg(llm.get('ttft_seconds')))} s",
+        f"  Average tokens/sec: {_fmt_num(_avg(llm.get('tokens_per_second')))}",
+        "",
+        "TTS",
+        f"  Requests: {_fmt_num(tts.get('request_count'))}",
+        f"  Total characters: {_fmt_num(tts.get('characters'))}",
+        f"  Total audio: {_fmt_num(_total(tts.get('audio_duration_seconds')))} s",
+        f"  Average TTFB: {_fmt_num(_avg(tts.get('ttfb_seconds')))} s",
+        "",
+        "STT",
+        f"  Metric events: {_fmt_num(stt.get('metric_event_count'))}",
+        f"  Total audio: {_fmt_num(_total(stt.get('audio_duration_seconds')))} s",
+        f"  Average transcription delay: {_fmt_num(_avg(eou.get('transcription_delay_seconds')))} s",
+        "",
+        "TURNS",
+        f"  Turns: {_fmt_num(turns.get('count'))}",
+        f"  Average end-to-end latency: {_fmt_num(turns.get('end_to_end_latency_seconds'))} s",
+        f"  Interrupted turns: {_fmt_num(interruptions.get('detected_count'))}",
+        "",
+        "TOOLS",
+        f"  Total calls: {_fmt_num(tools.get('count'))}",
+    ]
+    for name, count in (tools.get("by_name") or {}).items():
+        lines.append(f"  {name}: {_fmt_num(count)}")
     return "\n".join(lines)

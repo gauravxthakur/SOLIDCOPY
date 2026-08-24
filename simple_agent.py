@@ -17,6 +17,7 @@ from livekit.agents import AgentStateChangedEvent, MetricsCollectedEvent, metric
 from livekit.agents import function_tool, RunContext, ToolError
 from livekit.agents import mcp
 from metrics.analyzer import SessionMetricsAccumulator, format_summary
+import json
 import time
 import httpx
 
@@ -127,11 +128,9 @@ async def entrypoint(ctx: JobContext):
 
 
     async def log_usage():
-        # Print both summaries during validation so overlapping fields can be compared.
-        usage_summary = usage_collector.get_summary()
-        logger.info("Usage summary: %s", usage_summary)
         session_summary = session_metrics.summary()
-        logger.info("Session metrics summary:\n%s", format_summary(session_summary))
+        logger.info("\n%s", format_summary(session_summary))
+        logger.info("Session metrics JSON: %s", json.dumps(session_summary))
 
 
     # Fire log_usage when worker shuts down
