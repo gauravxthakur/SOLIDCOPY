@@ -115,6 +115,7 @@ async def entrypoint(ctx: JobContext):
 
     # Track End of Utterance timing (when turn detector decides user finished speaking)
     last_eou_metrics: metrics.EOUMetrics | None = None
+    summary_logged = False
 
     @session.on("metrics_collected")
     def _on_metrics_collected(ev: MetricsCollectedEvent):
@@ -127,7 +128,15 @@ async def entrypoint(ctx: JobContext):
         session_metrics.collect(ev.metrics)
 
 
-    async def log_usage():
+    async def log_usage(reason: str = "shutdown") -> None:
+        # Exactly once per entrypoint: duplicate prints were from dual log handlers,
+        # not double calculation — still guard against re-entrant shutdown.
+        nonlocal summary_logged
+        if summary_logged:
+            logger.debug("Skipping duplicate session metrics summary (reason=%s)", reason)
+            return
+        summary_logged = True
+
         session_summary = session_metrics.summary()
         logger.info("\n%s", format_summary(session_summary))
         logger.info("Session metrics JSON: %s", json.dumps(session_summary))
@@ -160,5 +169,7 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    # Do not call logging.basicConfig here: LiveKit's CLI attaches its own root
+    # handler. basicConfig would add a second StreamHandler and print every
+    # shutdown log twice in two different formats.
     agents.cli.run_app(server)
