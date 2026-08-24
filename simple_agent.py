@@ -16,7 +16,7 @@ from livekit.agents import stt, tts, llm, inference
 from livekit.agents import AgentStateChangedEvent, MetricsCollectedEvent, metrics
 from livekit.agents import function_tool, RunContext, ToolError
 from livekit.agents import mcp
-from metrics.analyzer import SessionMetricsAccumulator
+from metrics.analyzer import SessionMetricsAccumulator, format_summary
 import time
 import httpx
 
@@ -118,19 +118,20 @@ async def entrypoint(ctx: JobContext):
     @session.on("metrics_collected")
     def _on_metrics_collected(ev: MetricsCollectedEvent):
         nonlocal last_eou_metrics
-        # Capture EOU metrics for TTFA calculation
+
         if ev.metrics.type == "eou_metrics":
             last_eou_metrics = ev.metrics
 
-        # Log each metric as it arrives and add to usage collector
-        metrics.log_metrics(ev.metrics)
         usage_collector.collect(ev.metrics)
+        session_metrics.collect(ev.metrics)
 
 
     async def log_usage():
-        # Print per-session summary (tokens, audio duration, costs)
-        summary = usage_collector.get_summary()
-        logger.info("Usage summary: %s", summary)
+        # Print both summaries during validation so overlapping fields can be compared.
+        usage_summary = usage_collector.get_summary()
+        logger.info("Usage summary: %s", usage_summary)
+        session_summary = session_metrics.summary()
+        logger.info("Session metrics summary:\n%s", format_summary(session_summary))
 
 
     # Fire log_usage when worker shuts down
