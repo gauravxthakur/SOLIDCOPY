@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import time
 from typing import Any
 
 from livekit.agents.metrics import (
@@ -19,7 +21,7 @@ from livekit.agents.metrics import (
 @dataclass
 class _Statistics:
     count: int = 0
-    total: float = 0.0
+    sum: float = 0.0
     minimum: float | None = None
     maximum: float | None = None
 
@@ -31,18 +33,18 @@ class _Statistics:
         except (TypeError, ValueError):
             return
         self.count += 1
-        self.total += number
+        self.sum += number
         self.minimum = number if self.minimum is None else min(self.minimum, number)
         self.maximum = number if self.maximum is None else max(self.maximum, number)
 
     def summary(self, digits: int = 3) -> dict[str, float | int | None]:
-        average = self.total / self.count if self.count else None
+        average = self.sum / self.count if self.count else None
         return {
             "count": self.count,
             "average": round(average, digits) if average is not None else None,
             "minimum": round(self.minimum, digits) if self.minimum is not None else None,
             "maximum": round(self.maximum, digits) if self.maximum is not None else None,
-            "total": round(self.total, digits),
+            "total": round(self.sum, digits),
         }
 
 
@@ -50,6 +52,9 @@ class _Statistics:
 class SessionMetricsAccumulator:
     """Accumulates one running LiveKit agent session without reading exports."""
 
+    session_id: str | None = None
+    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    _started_monotonic: float = field(default_factory=time.monotonic, repr=False)
     metric_event_count: int = 0
     llm_requests: int = 0
     llm_prompt_tokens: int = 0
@@ -198,7 +203,14 @@ class SessionMetricsAccumulator:
         uncached_prompt_tokens = max(
             total_prompt_tokens - self.llm_cached_prompt_tokens, 0
         )
+        ended_at = datetime.now(timezone.utc)
         return {
+            "session": {
+                "session_id": self.session_id,
+                "started_at": self.started_at.isoformat(),
+                "ended_at": ended_at.isoformat(),
+                "duration_seconds": round(time.monotonic() - self._started_monotonic, 3),
+            },
             "events": {"metric_event_count": self.metric_event_count},
             "llm": {
                 "request_count": self.llm_requests,
@@ -228,10 +240,6 @@ class SessionMetricsAccumulator:
                 "duration_seconds": self.stt_duration.summary(),
                 "models": dict(self.stt_models),
             },
-            "vad": {
-                "event_count": self.vad_events,
-                "inference_duration_seconds": self.vad_inference_duration.summary(),
-            },
             "eou": {
                 "event_count": self.eou_events,
                 "end_of_utterance_delay_seconds": self.eou_delay.summary(),
@@ -239,6 +247,11 @@ class SessionMetricsAccumulator:
                 "callback_delay_seconds": self.eou_callback_delay.summary(),
                 "eot_inference_event_count": self.eot_inference_events,
                 "eot_inference_duration_seconds": self.eot_inference_duration.summary(),
+            },
+            "turns": {
+                "status": "not_collected_from_metrics_callback",
+                "count": None,
+                "end_to_end_latency_seconds": None,
             },
             "interruptions": {
                 "event_count": self.interruption_events,
@@ -251,6 +264,17 @@ class SessionMetricsAccumulator:
                 "detection_delay_seconds": self.interruption_detection_delay.summary(),
                 "prediction_duration_seconds": self.interruption_prediction_duration.summary(),
                 "total_duration_seconds": self.interruption_total_duration.summary(),
+            },
+            "tools": {
+                "status": "not_collected_from_metrics_callback",
+                "count": None,
+                "by_name": {},
+            },
+            "runtime": {
+                "llm_cancelled_count": self.llm_cancelled,
+                "tts_cancelled_count": self.tts_cancelled,
+                "vad_event_count": self.vad_events,
+                "vad_inference_duration_seconds": self.vad_inference_duration.summary(),
             },
         }
 
