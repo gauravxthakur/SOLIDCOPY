@@ -19,12 +19,24 @@ from livekit.agents import mcp
 from metrics.analyzer import SessionMetricsAccumulator, format_summary
 import json
 import time
+import uuid
 import httpx
 
 
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+
+def make_session_id(room_name: str) -> str:
+    """One Langfuse/session summary ID per conversation.
+
+    Console reuses room names like \"console\", so append a UUID there.
+    Production rooms should already be unique — use the room name as-is.
+    """
+    if room_name in {"", "console", "console-room"} or room_name.startswith("console"):
+        return f"{room_name or 'console'}-{uuid.uuid4().hex[:12]}"
+    return room_name
 
 
 
@@ -79,11 +91,13 @@ server = AgentServer()
 @server.rtc_session()
 async def entrypoint(ctx: JobContext):
 
-    session_metrics = SessionMetricsAccumulator()
+    session_id = make_session_id(ctx.room.name)
+    session_metrics = SessionMetricsAccumulator(session_id=session_id)
+    logger.info("Session id: %s (room=%s)", session_id, ctx.room.name)
 
     trace_provider = setup_langfuse(
         metadata={
-            "langfuse.session.id": ctx.room.name,
+            "langfuse.session.id": session_id,
         }
     )
     
