@@ -3,6 +3,9 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
+import json
+import re
 import time
 from typing import Any
 
@@ -95,6 +98,25 @@ class SessionMetricsAccumulator:
     backchannel_count: int = 0
     vad_events: int = 0
     vad_inference_duration: _Statistics = field(default_factory=_Statistics)
+    # Filled from session events (not metrics_collected alone)
+    user_utterance_count: int = 0
+    turn_count: int = 0
+    completed_turns: int = 0
+    interrupted_turns: int = 0
+    turn_e2e: _Statistics = field(default_factory=_Statistics)
+    turn_end_of_turn_delay: _Statistics = field(default_factory=_Statistics)
+    turn_llm_ttft: _Statistics = field(default_factory=_Statistics)
+    turn_tts_ttfb: _Statistics = field(default_factory=_Statistics)
+    ttfa: _Statistics = field(default_factory=_Statistics)
+    tool_calls: int = 0
+    tool_success: int = 0
+    tool_failed: int = 0
+    tool_by_name: Counter[str] = field(default_factory=Counter)
+    tool_duration: _Statistics = field(default_factory=_Statistics)
+    preemptive_started: int = 0
+    preemptive_invalidated: int = 0
+    _tool_started_at: dict[str, float] = field(default_factory=dict, repr=False)
+    _tool_names: dict[str, str] = field(default_factory=dict, repr=False)
 
     def collect(self, metric: Any) -> None:
         self.metric_event_count += 1
@@ -180,6 +202,59 @@ class SessionMetricsAccumulator:
         self.vad_events += 1
         self.vad_inference_duration.add(getattr(metric, "inference_duration_total", None))
 
+    def note_final_transcript(self) -> None:
+        """Count one user utterance from a final STT transcript event."""
+        self.user_utterance_count += 1
+
+    def note_assistant_message(self, item: Any) -> None:
+        """Record one agent turn from a conversation_item_added assistant message."""
+        if getattr(item, "role", None) != "assistant":
+            return
+        self.turn_count += 1
+        if bool(getattr(item, "interrupted", False)):
+            self.interrupted_turns += 1
+        else:
+            self.completed_turns += 1
+        report = getattr(item, "metrics", None) or {}
+        if isinstance(report, dict):
+            self.turn_e2e.add(report.get("e2e_latency"))
+            self.turn_end_of_turn_delay.add(report.get("end_of_turn_delay"))
+            self.turn_llm_ttft.add(report.get("llm_node_ttft"))
+            self.turn_tts_ttfb.add(report.get("tts_node_ttfb"))
+
+    def note_ttfa(self, seconds: float | None) -> None:
+        """Time from EOU decision to agent first audio (speaking)."""
+        self.ttfa.add(seconds)
+
+    def note_function_tools_executed(self, calls: Any, outputs: Any) -> None:
+        """Record a finished tool batch from function_tools_executed."""
+        pairs = list(zip(list(calls or []), list(outputs or []), strict=False))
+        for call, output in pairs:
+            name = str(getattr(call, "name", None) or "unknown")
+            self.tool_calls += 1
+            self.tool_by_name[name] += 1
+            if output is not None and bool(getattr(output, "is_error", False)):
+                self.tool_failed += 1
+            else:
+                self.tool_success += 1
+
+    def note_tool_started(self, call_id: str, name: str | None = None) -> None:
+        self._tool_started_at[call_id] = time.monotonic()
+        if name:
+            self._tool_names[call_id] = name
+
+    def note_tool_ended(self, call_id: str, status: str | None = None) -> None:
+        started = self._tool_started_at.pop(call_id, None)
+        self._tool_names.pop(call_id, None)
+        if started is not None:
+            self.tool_duration.add(time.monotonic() - started)
+
+    def note_preemptive_started(self) -> None:
+        self.preemptive_started += 1
+
+    def note_preemptive_invalidated(self) -> None:
+        self.preemptive_invalidated += 1
+
     @staticmethod
     def _count_model(counter: Counter[str], metric: Any) -> None:
         metadata = getattr(metric, "metadata", None)
@@ -236,7 +311,7 @@ class SessionMetricsAccumulator:
             },
             "stt": {
                 "metric_event_count": self.stt_metric_events,
-                "utterance_count": None,
+                "utterance_count": self.user_utterance_count,
                 "audio_duration_seconds": self.stt_audio_duration.summary(),
                 "duration_seconds": self.stt_duration.summary(),
                 "models": dict(self.stt_models),
@@ -250,9 +325,17 @@ class SessionMetricsAccumulator:
                 "eot_inference_duration_seconds": self.eot_inference_duration.summary(),
             },
             "turns": {
-                "status": "not_collected_from_metrics_callback",
-                "count": None,
-                "end_to_end_latency_seconds": None,
+                "count": self.turn_count,
+                "completed_count": self.completed_turns,
+                "interrupted_count": self.interrupted_turns,
+                "interruption_rate_percentage": self._percentage(
+                    self.interrupted_turns, self.turn_count
+                ),
+                "end_to_end_latency_seconds": self.turn_e2e.summary(),
+                "end_of_turn_delay_seconds": self.turn_end_of_turn_delay.summary(),
+                "llm_ttft_seconds": self.turn_llm_ttft.summary(),
+                "tts_ttfb_seconds": self.turn_tts_ttfb.summary(),
+                "ttfa_seconds": self.ttfa.summary(),
             },
             "interruptions": {
                 "event_count": self.interruption_events,
@@ -267,17 +350,42 @@ class SessionMetricsAccumulator:
                 "total_duration_seconds": self.interruption_total_duration.summary(),
             },
             "tools": {
-                "status": "not_collected_from_metrics_callback",
-                "count": None,
-                "by_name": {},
+                "count": self.tool_calls,
+                "successful_count": self.tool_success,
+                "failed_count": self.tool_failed,
+                "by_name": dict(self.tool_by_name),
+                "duration_seconds": self.tool_duration.summary(),
             },
             "runtime": {
                 "llm_cancelled_count": self.llm_cancelled,
                 "tts_cancelled_count": self.tts_cancelled,
                 "vad_event_count": self.vad_events,
                 "vad_inference_duration_seconds": self.vad_inference_duration.summary(),
+                "preemptive_started_count": self.preemptive_started,
+                "preemptive_invalidated_count": self.preemptive_invalidated,
+                "preemptive_invalidation_rate_percentage": self._percentage(
+                    self.preemptive_invalidated, self.preemptive_started
+                ),
             },
         }
+
+
+_SAFE_SESSION_ID = re.compile(r"[^A-Za-z0-9._-]+")
+DEFAULT_SUMMARY_DIR = Path("metrics/sessions")
+
+
+def persist_summary(
+    summary: dict[str, Any],
+    directory: Path | str | None = None,
+) -> Path:
+    """Write the structured session summary to disk. No prompts or transcripts."""
+    session_id = (summary.get("session") or {}).get("session_id") or "unknown"
+    safe_id = _SAFE_SESSION_ID.sub("_", str(session_id)).strip("._") or "unknown"
+    target = Path(directory) if directory else DEFAULT_SUMMARY_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    path = target / f"{safe_id}.json"
+    path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return path
 
 
 def _fmt_duration(seconds: float | None) -> str:
@@ -316,7 +424,6 @@ def format_summary(summary: dict[str, Any]) -> str:
     stt = summary.get("stt", {})
     eou = summary.get("eou", {})
     turns = summary.get("turns", {})
-    interruptions = summary.get("interruptions", {})
     tools = summary.get("tools", {})
 
     lines = [
@@ -340,16 +447,21 @@ def format_summary(summary: dict[str, Any]) -> str:
         "",
         "STT",
         f"  Metric events: {_fmt_num(stt.get('metric_event_count'))}",
+        f"  User utterances: {_fmt_num(stt.get('utterance_count'))}",
         f"  Total audio: {_fmt_num(_total(stt.get('audio_duration_seconds')))} s",
         f"  Average transcription delay: {_fmt_num(_avg(eou.get('transcription_delay_seconds')))} s",
         "",
         "TURNS",
         f"  Turns: {_fmt_num(turns.get('count'))}",
-        f"  Average end-to-end latency: {_fmt_num(turns.get('end_to_end_latency_seconds'))} s",
-        f"  Interrupted turns: {_fmt_num(interruptions.get('detected_count'))}",
+        f"  Completed: {_fmt_num(turns.get('completed_count'))}",
+        f"  Interrupted turns: {_fmt_num(turns.get('interrupted_count'))}",
+        f"  Average end-to-end latency: {_fmt_num(_avg(turns.get('end_to_end_latency_seconds')))} s",
+        f"  Average TTFA: {_fmt_num(_avg(turns.get('ttfa_seconds')))} s",
         "",
         "TOOLS",
         f"  Total calls: {_fmt_num(tools.get('count'))}",
+        f"  Successful: {_fmt_num(tools.get('successful_count'))}",
+        f"  Failed: {_fmt_num(tools.get('failed_count'))}",
     ]
     for name, count in (tools.get("by_name") or {}).items():
         lines.append(f"  {name}: {_fmt_num(count)}")

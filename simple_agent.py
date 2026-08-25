@@ -14,17 +14,35 @@ from livekit.plugins import noise_cancellation, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit.agents import stt, tts, llm, inference
 from livekit.agents import AgentStateChangedEvent, MetricsCollectedEvent, metrics
+from livekit.agents import (
+    ConversationItemAddedEvent,
+    FunctionToolsExecutedEvent,
+    ToolExecutionUpdatedEvent,
+    UserInputTranscribedEvent,
+)
 from livekit.agents import function_tool, RunContext, ToolError
 from livekit.agents import mcp
-from metrics.analyzer import SessionMetricsAccumulator, format_summary
+from metrics.analyzer import SessionMetricsAccumulator, format_summary, persist_summary
 import json
 import time
+import uuid
 import httpx
 
 
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+
+def make_session_id(room_name: str) -> str:
+    """One Langfuse/session summary ID per conversation.
+
+    Console reuses room names like \"console\", so append a UUID there.
+    Production rooms should already be unique — use the room name as-is.
+    """
+    if room_name in {"", "console", "console-room"} or room_name.startswith("console"):
+        return f"{room_name or 'console'}-{uuid.uuid4().hex[:12]}"
+    return room_name
 
 
 
@@ -79,11 +97,13 @@ server = AgentServer()
 @server.rtc_session()
 async def entrypoint(ctx: JobContext):
 
-    session_metrics = SessionMetricsAccumulator()
+    session_id = make_session_id(ctx.room.name)
+    session_metrics = SessionMetricsAccumulator(session_id=session_id)
+    logger.info("Session id: %s (room=%s)", session_id, ctx.room.name)
 
     trace_provider = setup_langfuse(
         metadata={
-            "langfuse.session.id": ctx.room.name,
+            "langfuse.session.id": session_id,
         }
     )
     
@@ -110,9 +130,6 @@ async def entrypoint(ctx: JobContext):
     )
 
 
-    # Aggregate data across all conversation turns
-    usage_collector = metrics.UsageCollector()
-
     # Track End of Utterance timing (when turn detector decides user finished speaking)
     last_eou_metrics: metrics.EOUMetrics | None = None
     summary_logged = False
@@ -124,9 +141,42 @@ async def entrypoint(ctx: JobContext):
         if ev.metrics.type == "eou_metrics":
             last_eou_metrics = ev.metrics
 
-        usage_collector.collect(ev.metrics)
         session_metrics.collect(ev.metrics)
 
+    @session.on("user_input_transcribed")
+    def _on_user_input_transcribed(ev: UserInputTranscribedEvent):
+        if ev.is_final:
+            session_metrics.note_final_transcript()
+
+    @session.on("conversation_item_added")
+    def _on_conversation_item_added(ev: ConversationItemAddedEvent):
+        session_metrics.note_assistant_message(ev.item)
+
+    @session.on("function_tools_executed")
+    def _on_function_tools_executed(ev: FunctionToolsExecutedEvent):
+        session_metrics.note_function_tools_executed(
+            ev.function_calls, ev.function_call_outputs
+        )
+
+    @session.on("tool_execution_updated")
+    def _on_tool_execution_updated(ev: ToolExecutionUpdatedEvent):
+        update = ev.update
+        update_type = getattr(update, "type", None)
+        if update_type == "tool_call_started":
+            call = update.function_call
+            session_metrics.note_tool_started(
+                call.call_id, getattr(call, "name", None)
+            )
+        elif update_type == "tool_call_ended":
+            session_metrics.note_tool_ended(update.call_id, getattr(update, "status", None))
+
+    @session.on("agent_state_changed")
+    def _on_agent_state_changed(ev: AgentStateChangedEvent):
+        nonlocal last_eou_metrics
+        if ev.new_state == "speaking" and last_eou_metrics is not None:
+            elapsed = time.time() - last_eou_metrics.timestamp
+            session_metrics.note_ttfa(elapsed)
+            last_eou_metrics = None
 
     async def log_usage(reason: str = "shutdown") -> None:
         # Exactly once per entrypoint: duplicate prints were from dual log handlers,
@@ -140,19 +190,15 @@ async def entrypoint(ctx: JobContext):
         session_summary = session_metrics.summary()
         logger.info("\n%s", format_summary(session_summary))
         logger.info("Session metrics JSON: %s", json.dumps(session_summary))
+        try:
+            path = persist_summary(session_summary)
+            logger.info("Session metrics saved: %s", path)
+        except OSError:
+            logger.exception("Failed to persist session metrics summary")
 
 
     # Fire log_usage when worker shuts down
     ctx.add_shutdown_callback(log_usage)
-
-
-    @session.on("agent_state_changed")
-    def _on_agent_state_changed(ev: AgentStateChangedEvent):
-        if ev.new_state == "speaking":
-            if last_eou_metrics:
-                # Calculate time since user finished speaking
-                elapsed = time.time() - last_eou_metrics.timestamp
-                logger.info(f"Time to first audio: {elapsed:.3f}s")
 
 
     # Start the session with noise cancellation enabled

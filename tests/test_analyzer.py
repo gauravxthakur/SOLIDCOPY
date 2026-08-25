@@ -101,7 +101,48 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
 
         stt = accumulator.summary()["stt"]
         self.assertEqual(stt["metric_event_count"], 2)
-        self.assertIsNone(stt["utterance_count"])
+        self.assertEqual(stt["utterance_count"], 0)
+
+        accumulator.note_final_transcript()
+        accumulator.note_final_transcript()
+        self.assertEqual(accumulator.summary()["stt"]["utterance_count"], 2)
+        self.assertEqual(accumulator.summary()["stt"]["metric_event_count"], 2)
+
+    def test_turns_tools_and_ttfa_from_session_events(self):
+        accumulator = SessionMetricsAccumulator()
+
+        class Msg:
+            role = "assistant"
+            interrupted = False
+            metrics = {
+                "e2e_latency": 2.0,
+                "end_of_turn_delay": 0.5,
+                "llm_node_ttft": 0.8,
+                "tts_node_ttfb": 0.1,
+            }
+
+        class Call:
+            name = "docs_search"
+            call_id = "c1"
+
+        class Out:
+            is_error = False
+
+        accumulator.note_assistant_message(Msg())
+        accumulator.note_ttfa(1.25)
+        accumulator.note_function_tools_executed([Call()], [Out()])
+        accumulator.note_tool_started("c1", "docs_search")
+        accumulator.note_tool_ended("c1", "done")
+
+        summary = accumulator.summary()
+        self.assertEqual(summary["turns"]["count"], 1)
+        self.assertEqual(summary["turns"]["completed_count"], 1)
+        self.assertEqual(summary["turns"]["end_to_end_latency_seconds"]["average"], 2.0)
+        self.assertEqual(summary["turns"]["ttfa_seconds"]["average"], 1.25)
+        self.assertEqual(summary["tools"]["count"], 1)
+        self.assertEqual(summary["tools"]["by_name"]["docs_search"], 1)
+        self.assertEqual(summary["tools"]["successful_count"], 1)
+        self.assertGreaterEqual(summary["tools"]["duration_seconds"]["count"], 1)
 
     def test_interruption_durations_remain_separate(self):
         accumulator = SessionMetricsAccumulator()
@@ -137,6 +178,76 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
         self.assertIsNone(summary["tts"]["streamed_percentage"])
         self.assertIsNone(summary["interruptions"]["event_rate_percentage"])
         json.dumps(summary)
+
+    def test_persist_summary_writes_session_json(self):
+        import tempfile
+        from pathlib import Path
+
+        from metrics.analyzer import persist_summary
+
+        accumulator = SessionMetricsAccumulator(session_id="console-room-abc123")
+        summary = accumulator.summary()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = persist_summary(summary, directory=tmp)
+            self.assertTrue(path.exists())
+            self.assertEqual(path.name, "console-room-abc123.json")
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(loaded["session"]["session_id"], "console-room-abc123")
+            self.assertNotIn("messages", loaded)
+            self.assertNotIn("system_prompt", loaded)
+            self.assertNotIn("prompt_text", loaded)
+            self.assertNotIn("transcript_text", loaded)
+            self.assertNotIn("user_text", loaded)
+
+
+class LangfuseReportTests(unittest.TestCase):
+    def test_aggregate_uses_exact_names_and_tool_failure_rate(self):
+        from metrics.langfuse_report import aggregate_observations
+
+        observations = [
+            {
+                "name": "llm_request",
+                "type": "GENERATION",
+                "session_id": "s1",
+                "latency": 1.0,
+                "time_to_first_token": 0.4,
+                "total_cost": 0.01,
+                "level": "DEFAULT",
+            },
+            {
+                "name": "llm_node",
+                "type": "SPAN",
+                "session_id": "s1",
+                "latency": 9.0,
+                "total_cost": 0.0,
+                "level": "DEFAULT",
+            },
+            {
+                "name": "docs_search",
+                "type": "TOOL",
+                "session_id": "s1",
+                "latency": 0.2,
+                "total_cost": 0.0,
+                "level": "ERROR",
+            },
+            {
+                "name": "docs_search",
+                "type": "TOOL",
+                "session_id": "s1",
+                "latency": 0.3,
+                "total_cost": 0.0,
+                "level": "DEFAULT",
+            },
+        ]
+        report = aggregate_observations(observations)
+        self.assertEqual(report["canonical"]["llm_request"]["count"], 1)
+        self.assertNotIn("llm_node", report["canonical"])
+        self.assertEqual(report["other_names"]["llm_node"], 1)
+        self.assertEqual(report["total_cost_usd"], 0.01)
+        self.assertEqual(report["tools"]["count"], 2)
+        self.assertEqual(report["tools"]["error_count"], 1)
+        self.assertEqual(report["tools"]["failure_rate_percentage"], 50.0)
+        self.assertEqual(report["latency"]["llm_request"]["p50"], 1.0)
 
 
 if __name__ == "__main__":
