@@ -101,7 +101,48 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
 
         stt = accumulator.summary()["stt"]
         self.assertEqual(stt["metric_event_count"], 2)
-        self.assertIsNone(stt["utterance_count"])
+        self.assertEqual(stt["utterance_count"], 0)
+
+        accumulator.note_final_transcript()
+        accumulator.note_final_transcript()
+        self.assertEqual(accumulator.summary()["stt"]["utterance_count"], 2)
+        self.assertEqual(accumulator.summary()["stt"]["metric_event_count"], 2)
+
+    def test_turns_tools_and_ttfa_from_session_events(self):
+        accumulator = SessionMetricsAccumulator()
+
+        class Msg:
+            role = "assistant"
+            interrupted = False
+            metrics = {
+                "e2e_latency": 2.0,
+                "end_of_turn_delay": 0.5,
+                "llm_node_ttft": 0.8,
+                "tts_node_ttfb": 0.1,
+            }
+
+        class Call:
+            name = "docs_search"
+            call_id = "c1"
+
+        class Out:
+            is_error = False
+
+        accumulator.note_assistant_message(Msg())
+        accumulator.note_ttfa(1.25)
+        accumulator.note_function_tools_executed([Call()], [Out()])
+        accumulator.note_tool_started("c1", "docs_search")
+        accumulator.note_tool_ended("c1", "done")
+
+        summary = accumulator.summary()
+        self.assertEqual(summary["turns"]["count"], 1)
+        self.assertEqual(summary["turns"]["completed_count"], 1)
+        self.assertEqual(summary["turns"]["end_to_end_latency_seconds"]["average"], 2.0)
+        self.assertEqual(summary["turns"]["ttfa_seconds"]["average"], 1.25)
+        self.assertEqual(summary["tools"]["count"], 1)
+        self.assertEqual(summary["tools"]["by_name"]["docs_search"], 1)
+        self.assertEqual(summary["tools"]["successful_count"], 1)
+        self.assertGreaterEqual(summary["tools"]["duration_seconds"]["count"], 1)
 
     def test_interruption_durations_remain_separate(self):
         accumulator = SessionMetricsAccumulator()
