@@ -88,3 +88,4 @@ coverage.xml
 *.db
 
 /metrics/traces
+/metrics/sessions

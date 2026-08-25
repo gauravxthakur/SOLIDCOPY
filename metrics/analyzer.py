@@ -3,6 +3,9 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
+import json
+import re
 import time
 from typing import Any
 
@@ -365,6 +368,24 @@ class SessionMetricsAccumulator:
                 ),
             },
         }
+
+
+_SAFE_SESSION_ID = re.compile(r"[^A-Za-z0-9._-]+")
+DEFAULT_SUMMARY_DIR = Path("metrics/sessions")
+
+
+def persist_summary(
+    summary: dict[str, Any],
+    directory: Path | str | None = None,
+) -> Path:
+    """Write the structured session summary to disk. No prompts or transcripts."""
+    session_id = (summary.get("session") or {}).get("session_id") or "unknown"
+    safe_id = _SAFE_SESSION_ID.sub("_", str(session_id)).strip("._") or "unknown"
+    target = Path(directory) if directory else DEFAULT_SUMMARY_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    path = target / f"{safe_id}.json"
+    path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return path
 
 
 def _fmt_duration(seconds: float | None) -> str:

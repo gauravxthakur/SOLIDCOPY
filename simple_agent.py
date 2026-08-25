@@ -22,7 +22,7 @@ from livekit.agents import (
 )
 from livekit.agents import function_tool, RunContext, ToolError
 from livekit.agents import mcp
-from metrics.analyzer import SessionMetricsAccumulator, format_summary
+from metrics.analyzer import SessionMetricsAccumulator, format_summary, persist_summary
 import json
 import time
 import uuid
@@ -190,6 +190,11 @@ async def entrypoint(ctx: JobContext):
         session_summary = session_metrics.summary()
         logger.info("\n%s", format_summary(session_summary))
         logger.info("Session metrics JSON: %s", json.dumps(session_summary))
+        try:
+            path = persist_summary(session_summary)
+            logger.info("Session metrics saved: %s", path)
+        except OSError:
+            logger.exception("Failed to persist session metrics summary")
 
 
     # Fire log_usage when worker shuts down
