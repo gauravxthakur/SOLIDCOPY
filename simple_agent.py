@@ -28,7 +28,7 @@ import time
 import uuid
 import httpx
 
-from plugins.providers.providers import get_llm_provider, get_stt_provider
+from plugins.providers.providers import get_llm_provider, get_stt_provider, get_tts_provider
 
 
 logger = logging.getLogger(__name__)
@@ -124,7 +124,9 @@ async def entrypoint(ctx: JobContext):
         llm=get_llm_provider(provider_type="google"),
         # llm="openai/gpt-4.1-mini",
         
-        tts="cartesia/sonic-3",
+        tts=get_tts_provider(provider_type="cartesia"),
+        # tts="cartesia/sonic-3",
+        
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
         # preemptive_generation=True,
