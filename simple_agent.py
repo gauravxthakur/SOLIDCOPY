@@ -28,7 +28,7 @@ import time
 import uuid
 import httpx
 
-from plugins.providers.llm import get_llm_provider
+from plugins.providers.providers import get_llm_provider, get_stt_provider, get_tts_provider
 
 
 logger = logging.getLogger(__name__)
@@ -118,9 +118,15 @@ async def entrypoint(ctx: JobContext):
     # Configure the voice pipeline with STT, LLM, TTS, and VAD providers
     session = AgentSession(
 
-        stt="assemblyai/universal-streaming:en",
+        stt=get_stt_provider("deepgram"),
+        # stt="deepgram/nova-3:en",
+        
         llm=get_llm_provider(provider_type="google"),
-        tts="cartesia/sonic-3",
+        # llm="openai/gpt-4.1-mini",
+        
+        tts=get_tts_provider(provider_type="cartesia"),
+        # tts="cartesia/sonic-3",
+        
         vad=silero.VAD.load(),
         turn_detection=MultilingualModel(),
         # preemptive_generation=True,

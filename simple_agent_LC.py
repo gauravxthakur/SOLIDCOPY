@@ -116,7 +116,8 @@ async def entrypoint(ctx: JobContext):
     # Configure the voice pipeline with STT, LLM, TTS, and VAD providers
     session = AgentSession(
 
-        stt="assemblyai/universal-streaming:en",
+        stt="deepgram/nova-3:en",
+        # stt="assemblyai/universal-streaming:en",
         llm="openai/gpt-4.1-mini",
         tts="cartesia/sonic-3",
         vad=silero.VAD.load(),
