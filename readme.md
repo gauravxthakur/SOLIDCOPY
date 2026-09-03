@@ -18,3 +18,11 @@ TTS: Cartesia primary, Inworld backup
 
 ## Resources
 Building Production-Ready Voice Agents with LiveKit https://worksh.app/tutorials/livekit-voice-agent
+
+## License & Trademark Policy
+
+This project is licensed under the [MIT License](LICENSE). You are free to copy, modify, and distribute the software.
+
+However, the SOLIDCOPY name, logo, and branding are protected assets. 
+* Allowed: You may use the name to truthfully state that your project is "a fork of SOLIDCOPY" or "based on SOLIDCOPY".
+* Not Allowed: You may not use the name SOLIDCOPY as the primary name of your fork, or in any way that implies official endorsement.
