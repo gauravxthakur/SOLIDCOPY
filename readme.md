@@ -5,6 +5,11 @@ uv sync
 ## Add environment variables
 Create a .env file with the help of .env.example
 
+## Download the Turn Detection Model
+```bash
+uv run python -m livekit.agents download-files
+```
+
 ## Running the Agent
 ```bash
 uv run simple_agent.py download-files # run only once
@@ -21,7 +26,7 @@ Building Production-Ready Voice Agents with LiveKit https://worksh.app/tutorials
 
 ## License & Trademark Policy
 
-This project is licensed under the [MIT License](LICENSE). You are free to copy, modify, and distribute the software.
+This project is licensed under the [MIT License](LICENSE.md). You are free to copy, modify, and distribute the software.
 
 However, the SOLIDCOPY name, logo, and branding are protected assets. 
 * Allowed: You may use the name to truthfully state that your project is "a fork of SOLIDCOPY" or "based on SOLIDCOPY".
