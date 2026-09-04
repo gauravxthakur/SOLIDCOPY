@@ -11,7 +11,9 @@ from dotenv import load_dotenv
 from livekit import agents
 from livekit.agents import Agent, AgentServer, AgentSession, JobContext, room_io
 from livekit.plugins import noise_cancellation, silero
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
+# from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from livekit.agents.inference import TurnDetector
+
 from livekit.agents import stt, tts, llm, inference
 from livekit.agents import AgentStateChangedEvent, MetricsCollectedEvent, metrics
 from livekit.agents import (
@@ -128,7 +130,10 @@ async def entrypoint(ctx: JobContext):
         # tts="cartesia/sonic-3",
         
         vad=silero.VAD.load(),
-        turn_detection=MultilingualModel(),
+        
+        turn_detection=TurnDetector(),
+        # turn_detection=MultilingualModel(),
+        
         # preemptive_generation=True,
         #mcp_servers=[mcp.MCPServerHTTP(url="http://docs.livekit.io/mcp"),],
         tools=[
