@@ -34,6 +34,59 @@ class TTSRate:
 
 
 @dataclass
+class CreditAccount:
+    """Simulation of customer credits; it does not enforce call termination."""
+
+    plan_name: str
+    customer_rate_per_second: Decimal
+    credit_balance: Decimal | None
+    credit_seconds_per_second: Decimal = Decimal("1")
+    credits_used: Decimal = Decimal("0")
+    customer_revenue: Decimal = Decimal("0")
+
+    @classmethod
+    def from_environment(cls) -> "CreditAccount":
+        plan_name = os.getenv("FONAZO_PLAN_NAME", "standard")
+        rate = os.getenv("FONAZO_CUSTOMER_RATE_INR_PER_SECOND", "0.10")
+        balance = os.getenv("FONAZO_CREDIT_BALANCE")
+        return cls(
+            plan_name=plan_name,
+            customer_rate_per_second=_decimal(rate),
+            credit_balance=_decimal(balance) if balance is not None else None,
+        )
+
+    def record_connected_seconds(self, seconds: Any) -> dict[str, float | None]:
+        connected_seconds = max(_decimal(seconds), Decimal("0"))
+        self.credits_used += connected_seconds * self.credit_seconds_per_second
+        self.customer_revenue += connected_seconds * self.customer_rate_per_second
+        return self.snapshot()
+
+    def snapshot(self) -> dict[str, float | None]:
+        credits_remaining = (
+            self.credit_balance - self.credits_used
+            if self.credit_balance is not None
+            else None
+        )
+        projected_seconds_left = (
+            max(credits_remaining, Decimal("0")) / self.credit_seconds_per_second
+            if credits_remaining is not None
+            else None
+        )
+        return {
+            "credits_used": _number(self.credits_used),
+            "credits_remaining": (
+                _number(credits_remaining) if credits_remaining is not None else None
+            ),
+            "projected_seconds_left": (
+                _number(projected_seconds_left)
+                if projected_seconds_left is not None
+                else None
+            ),
+            "customer_revenue_inr": _number(self.customer_revenue),
+        }
+
+
+@dataclass
 class RateCard:
     """Rates keyed by the model/provider labels emitted by LiveKit metrics."""
 

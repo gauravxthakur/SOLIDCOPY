@@ -19,7 +19,7 @@ from livekit.agents.metrics import (
     TTSMetrics,
     VADMetrics,
 )
-from metrics.costs import CostCalculator, RateCard
+from metrics.costs import CostCalculator, CreditAccount, RateCard
 
 
 @dataclass
@@ -58,6 +58,7 @@ class SessionMetricsAccumulator:
 
     session_id: str | None = None
     rate_card: RateCard | None = None
+    credit_account: CreditAccount | None = None
     llm_model: str | None = None
     stt_model: str | None = None
     tts_model: str | None = None
@@ -128,6 +129,7 @@ class SessionMetricsAccumulator:
 
     def __post_init__(self) -> None:
         self.rate_card = self.rate_card or RateCard.from_environment()
+        self.credit_account = self.credit_account or CreditAccount.from_environment()
         self._cost_calculator = CostCalculator(self.rate_card)
 
     def collect(self, metric: Any) -> None:
@@ -395,6 +397,9 @@ class SessionMetricsAccumulator:
         turn["interrupted"] = bool(getattr(item, "interrupted", False))
         turn["turn_duration_seconds"] = self._turn_duration(turn, report)
         turn["cost_breakdown"] = self._cost_calculator.calculate_turn(turn)
+        turn["credit_simulation"] = self.credit_account.record_connected_seconds(
+            turn["turn_duration_seconds"] or 0
+        )
         self.turns.append(self._finalize_turn(turn))
         self._pending_turn = None
 
@@ -504,6 +509,15 @@ class SessionMetricsAccumulator:
                 for breakdown in turn_costs
             ),
         }
+        credit_summary = {
+            "plan_name": self.credit_account.plan_name,
+            "customer_rate_inr_per_second": float(
+                self.credit_account.customer_rate_per_second
+            ),
+            "credit_unit": "1 connected second",
+            "connected_seconds_source": "completed_turn_duration_simulation",
+            **self.credit_account.snapshot(),
+        }
         return {
             "session": {
                 "session_id": self.session_id,
@@ -513,6 +527,7 @@ class SessionMetricsAccumulator:
             },
             "events": {"metric_event_count": self.metric_event_count},
             "cost_breakdown": cost_breakdown,
+            "credit_simulation": credit_summary,
             "llm": {
                 "request_count": self.llm_requests,
                 "prompt_tokens": total_prompt_tokens,

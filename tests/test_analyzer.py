@@ -238,6 +238,40 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
         self.assertIsNone(summary["cost_breakdown"]["lines"]["llm"]["cost_usd"])
         self.assertEqual(summary["cost_breakdown"]["total_cost_usd"], 0)
 
+    def test_credit_simulation_tracks_plan_balance_usage_and_revenue(self):
+        from decimal import Decimal
+
+        from metrics.analyzer import SessionMetricsAccumulator
+        from metrics.costs import CreditAccount
+
+        account = CreditAccount(
+            plan_name="standard",
+            customer_rate_per_second=Decimal("0.10"),
+            credit_balance=Decimal("100"),
+        )
+        accumulator = SessionMetricsAccumulator(
+            session_id="credits-1",
+            credit_account=account,
+        )
+
+        class Msg:
+            role = "assistant"
+            interrupted = False
+            metrics = {"e2e_latency": 12.5}
+
+        accumulator.note_assistant_message(Msg())
+        summary = accumulator.summary()
+        credit = summary["credit_simulation"]
+        self.assertEqual(credit["plan_name"], "standard")
+        self.assertEqual(credit["credits_used"], 12.5)
+        self.assertEqual(credit["credits_remaining"], 87.5)
+        self.assertEqual(credit["projected_seconds_left"], 87.5)
+        self.assertEqual(credit["customer_revenue_inr"], 1.25)
+        self.assertEqual(
+            summary["turns"]["records"][0]["credit_simulation"]["credits_used"],
+            12.5,
+        )
+
     def test_interruption_durations_remain_separate(self):
         accumulator = SessionMetricsAccumulator()
         accumulator.collect(metrics.InterruptionMetrics(
