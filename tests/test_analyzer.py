@@ -272,6 +272,29 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
             12.5,
         )
 
+    def test_checkpoint_writes_after_turn_and_deduplicates_turn_key(self):
+        import tempfile
+
+        accumulator = SessionMetricsAccumulator(session_id="checkpoint-1")
+
+        class Msg:
+            role = "assistant"
+            interrupted = False
+            metrics = {"e2e_latency": 2.0}
+
+        accumulator.note_assistant_message(Msg())
+        with tempfile.TemporaryDirectory() as tmp:
+            first = accumulator.checkpoint_after_turn(tmp)
+            second = accumulator.checkpoint_after_turn(tmp)
+            self.assertEqual(first, second)
+            loaded = json.loads(first.read_text(encoding="utf-8"))
+            records = loaded["turns"]["records"]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(
+                f"{loaded['session']['session_id']}:{records[0]['turn_id']}",
+                "checkpoint-1:turn-0001",
+            )
+
     def test_interruption_durations_remain_separate(self):
         accumulator = SessionMetricsAccumulator()
         accumulator.collect(metrics.InterruptionMetrics(

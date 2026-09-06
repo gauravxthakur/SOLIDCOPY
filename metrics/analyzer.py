@@ -126,6 +126,7 @@ class SessionMetricsAccumulator:
     _tool_names: dict[str, str] = field(default_factory=dict, repr=False)
     _pending_turn: dict[str, Any] | None = field(default=None, repr=False)
     _cost_calculator: CostCalculator = field(init=False, repr=False)
+    _checkpointed_turn_keys: set[str] = field(default_factory=set, repr=False)
 
     def __post_init__(self) -> None:
         self.rate_card = self.rate_card or RateCard.from_environment()
@@ -403,6 +404,26 @@ class SessionMetricsAccumulator:
         self.turns.append(self._finalize_turn(turn))
         self._pending_turn = None
 
+    def checkpoint_after_turn(self, directory: Path | str | None = None) -> Path | None:
+        """Persist the current summary after a turn, deduplicated by session and turn."""
+        if not self.turns:
+            return None
+        latest = self.turns[-1]
+        key = self._turn_key(latest)
+        if key in self._checkpointed_turn_keys:
+            return self._checkpoint_path(directory)
+        self._checkpointed_turn_keys.add(key)
+        return persist_summary(self.summary(), directory=directory)
+
+    def _checkpoint_path(self, directory: Path | str | None = None) -> Path:
+        session_id = self.session_id or "unknown"
+        safe_id = _SAFE_SESSION_ID.sub("_", str(session_id)).strip("._") or "unknown"
+        target = Path(directory) if directory else DEFAULT_SUMMARY_DIR
+        return target / f"{safe_id}.json"
+
+    def _turn_key(self, turn: dict[str, Any]) -> str:
+        return f"{self.session_id or 'unknown'}:{turn.get('turn_id')}"
+
     def note_ttfa(self, seconds: float | None) -> None:
         """Time from EOU decision to agent first audio (speaking)."""
         self.ttfa.add(seconds)
@@ -626,7 +647,9 @@ def persist_summary(
     target = Path(directory) if directory else DEFAULT_SUMMARY_DIR
     target.mkdir(parents=True, exist_ok=True)
     path = target / f"{safe_id}.json"
-    path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    temporary.replace(path)
     return path
 
 

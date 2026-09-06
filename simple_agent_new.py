@@ -157,6 +157,12 @@ async def entrypoint(ctx: JobContext):
     @session.on("conversation_item_added")
     def _on_conversation_item_added(ev: ConversationItemAddedEvent):
         session_metrics.note_assistant_message(ev.item)
+        try:
+            path = session_metrics.checkpoint_after_turn()
+            if path:
+                logger.info("Session metrics checkpoint saved: %s", path)
+        except OSError:
+            logger.exception("Failed to save session metrics checkpoint")
 
     @session.on("function_tools_executed")
     def _on_function_tools_executed(ev: FunctionToolsExecutedEvent):
