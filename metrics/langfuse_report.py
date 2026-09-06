@@ -13,11 +13,13 @@ from datetime import datetime, timedelta, timezone
 import argparse
 import json
 import os
+from pathlib import Path
 import statistics
 from typing import Any
 
 from dotenv import load_dotenv
 from langfuse import Langfuse
+from metrics.costs import CostCalculator, RateCard
 
 CANONICAL_NAMES = {
     "llm_request",
@@ -199,6 +201,154 @@ def aggregate_observations(observations: list[Any]) -> dict[str, Any]:
     }
 
 
+def _usage_value(obs: Any, *keys: str) -> float | None:
+    value = _first_not_none(obs, *keys)
+    if value is not None:
+        return _float(value)
+    usage = _first_not_none(obs, "usage", "usage_details", "usageDetails")
+    if isinstance(usage, dict):
+        for key in keys:
+            if key in usage:
+                return _float(usage[key])
+    return None
+
+
+def _local_llm_summary(session_summary: dict[str, Any]) -> dict[str, Any]:
+    records = (session_summary.get("turns") or {}).get("records") or []
+    llm = session_summary.get("llm") or {}
+    llm_records = [record for record in records if record.get("prompt_tokens") is not None]
+    cost_line = _local_cost_line(session_summary, "llm")
+    return {
+        "model": sorted({record.get("llm_model") for record in llm_records if record.get("llm_model")}),
+        "request_count": llm.get("request_count", len(llm_records)),
+        "input_tokens": llm.get(
+            "prompt_tokens", sum(record.get("prompt_tokens") or 0 for record in llm_records)
+        ),
+        "cached_tokens": llm.get(
+            "cached_prompt_tokens",
+            sum(record.get("cached_prompt_tokens") or 0 for record in llm_records),
+        ),
+        "completion_tokens": llm.get(
+            "completion_tokens", sum(record.get("completion_tokens") or 0 for record in llm_records)
+        ),
+        "ttft_seconds": llm.get("ttft_seconds") or _latency_stats([
+            float(record["ttft_seconds"])
+            for record in llm_records
+            if record.get("ttft_seconds") is not None
+        ]),
+        "cost_usd": cost_line.get("cost_usd"),
+        "cost_status": cost_line.get("status"),
+    }
+
+
+def _local_cost_line(session_summary: dict[str, Any], name: str) -> dict[str, Any]:
+    line = ((session_summary.get("cost_breakdown") or {}).get("lines") or {}).get(name)
+    return line or {"status": "not_available", "cost_usd": None}
+
+
+def compare_session(
+    session_summary: dict[str, Any],
+    observations: list[Any],
+    rate_card: RateCard,
+) -> dict[str, Any]:
+    """Compare one local session summary with its exact Langfuse observations."""
+    session_id = (session_summary.get("session") or {}).get("session_id")
+    langfuse_llm = [
+        observation
+        for observation in observations
+        if str(_obs_get(observation, "name") or "") == "llm_request"
+    ]
+    langfuse_summary = {
+        "model": sorted({
+            str(model)
+            for observation in langfuse_llm
+            for model in [_first_not_none(observation, "model", "model_name", "modelName")]
+            if model is not None
+        }),
+        "request_count": len(langfuse_llm),
+        "input_tokens": sum(
+            _usage_value(observation, "input_tokens", "prompt_tokens", "inputTokens", "promptTokens") or 0
+            for observation in langfuse_llm
+        ),
+        "cached_tokens": sum(
+            _usage_value(
+                observation,
+                "cached_input_tokens",
+                "prompt_cached_tokens",
+                "cachedTokens",
+            ) or 0
+            for observation in langfuse_llm
+        ),
+        "completion_tokens": sum(
+            _usage_value(
+                observation,
+                "output_tokens",
+                "completion_tokens",
+                "outputTokens",
+                "completionTokens",
+            ) or 0
+            for observation in langfuse_llm
+        ),
+        "ttft_seconds": _latency_stats([
+            value
+            for observation in langfuse_llm
+            for value in [_float(_first_not_none(observation, "time_to_first_token", "timeToFirstToken"))]
+            if value is not None
+        ]),
+        "cost_usd": round(sum(
+            _float(_first_not_none(observation, "total_cost", "totalCost")) or 0
+            for observation in langfuse_llm
+        ), 6),
+    }
+    local = _local_llm_summary(session_summary)
+    local_costs = {"llm": [], "stt": [], "tts": []}
+    calculator = CostCalculator(rate_card)
+    for record in (session_summary.get("turns") or {}).get("records") or []:
+        breakdown = calculator.calculate_turn(record)
+        for name, line in breakdown["lines"].items():
+            if line["status"] == "measured":
+                local_costs[name].append(line["cost_usd"])
+    own_costs = {
+        name: {
+            "status": "measured" if values else "not_applicable",
+            "cost_usd": round(sum(values), 6) if values else None,
+        }
+        for name, values in local_costs.items()
+    }
+    return {
+        "session_id": session_id,
+        "langfuse_observation_count": len(observations),
+        "llm": {
+            "local": local,
+            "langfuse": langfuse_summary,
+            "differences": {
+                key: {
+                    "local": local[key],
+                    "langfuse": langfuse_summary[key],
+                }
+                for key in (
+                    "model",
+                    "request_count",
+                    "input_tokens",
+                    "cached_tokens",
+                    "completion_tokens",
+                    "cost_usd",
+                    "ttft_seconds",
+                )
+            },
+        },
+        "own_rate_card_costs": {
+            "stt": own_costs["stt"],
+            "tts": own_costs["tts"],
+        },
+        "notes": [
+            "Langfuse is compared only for exact llm_request observations.",
+            "STT and TTS costs come from the local usage records and supplied rate card.",
+            "Langfuse zero STT/TTS cost is not treated as proof of free usage.",
+        ],
+    }
+
+
 def fetch_observations(
     client: Langfuse,
     *,
@@ -268,9 +418,39 @@ def build_report(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Aggregate Langfuse observations for a time range.")
     parser.add_argument("--session-id", default=None, help="Optional Langfuse session id")
+    parser.add_argument(
+        "--session-json",
+        default=None,
+        help="Local session JSON to compare with Langfuse for the same session",
+    )
+    parser.add_argument(
+        "--rate-card",
+        default=None,
+        help="Rate-card JSON file used for local STT/TTS cost calculation",
+    )
     parser.add_argument("--hours", type=float, default=24, help="Lookback window (default 24)")
     args = parser.parse_args()
     report = build_report(session_id=args.session_id, hours=args.hours)
+    if args.session_json:
+        session_summary = json.loads(Path(args.session_json).read_text(encoding="utf-8"))
+        session_id = (session_summary.get("session") or {}).get("session_id")
+        if not session_id:
+            raise ValueError("Local session JSON does not contain session.session_id")
+        if args.session_id and args.session_id != session_id:
+            raise ValueError("--session-id does not match session.session_id in --session-json")
+        rate_card = RateCard.from_json(args.rate_card) if args.rate_card else RateCard.from_environment()
+        report["session_comparison"] = compare_session(
+            session_summary,
+            fetch_observations(
+                Langfuse(
+                    public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+                    secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
+                    base_url=os.getenv("LANGFUSE_BASE_URL") or os.getenv("LANGFUSE_HOST"),
+                ),
+                session_id=session_id,
+            ),
+            rate_card,
+        )
     print(json.dumps(report, indent=2))
 
 

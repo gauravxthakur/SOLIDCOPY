@@ -352,6 +352,67 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
 
 
 class LangfuseReportTests(unittest.TestCase):
+    def test_compare_session_checks_llm_and_calculates_local_stt_tts_costs(self):
+        from metrics.costs import RateCard
+        from metrics.langfuse_report import compare_session
+
+        local_summary = {
+            "session": {"session_id": "s1"},
+            "cost_breakdown": {"lines": {}},
+            "turns": {
+                "records": [
+                    {
+                        "llm_model": "openai/gpt-4.1-mini",
+                        "prompt_tokens": 100,
+                        "cached_prompt_tokens": 60,
+                        "completion_tokens": 20,
+                        "ttft_seconds": 0.4,
+                        "stt_model": "deepgram/nova-3:en",
+                        "stt_audio_seconds": 4,
+                        "tts_model": "cartesia/sonic-3",
+                        "tts_characters": 24,
+                        "tts_audio_seconds": 2,
+                    }
+                ]
+            },
+        }
+        rate_card = RateCard.from_dict({
+            "llm": {
+                "openai/gpt-4.1-mini": {
+                    "cached_input_per_token": "0.000001",
+                    "uncached_input_per_token": "0.000002",
+                    "completion_per_token": "0.000003",
+                }
+            },
+            "stt": {"deepgram/nova-3:en": {"per_audio_second": "0.01"}},
+            "tts": {
+                "cartesia/sonic-3": {
+                    "per_character": "0.001",
+                    "billing_basis": "characters",
+                }
+            },
+        })
+        result = compare_session(
+            local_summary,
+            [{
+                "name": "llm_request",
+                "model": "openai/gpt-4.1-mini",
+                "input_tokens": 100,
+                "cached_input_tokens": 60,
+                "output_tokens": 20,
+                "time_to_first_token": 0.4,
+                "total_cost": 0.0001,
+            }],
+            rate_card,
+        )
+
+        self.assertEqual(result["llm"]["local"]["request_count"], 1)
+        self.assertEqual(result["llm"]["langfuse"]["request_count"], 1)
+        self.assertEqual(result["llm"]["differences"]["input_tokens"]["local"], 100)
+        self.assertEqual(result["llm"]["langfuse"]["cost_usd"], 0.0001)
+        self.assertEqual(result["own_rate_card_costs"]["stt"]["cost_usd"], 0.04)
+        self.assertEqual(result["own_rate_card_costs"]["tts"]["cost_usd"], 0.024)
+
     def test_aggregate_uses_exact_names_and_tool_failure_rate(self):
         from metrics.langfuse_report import aggregate_observations
 
