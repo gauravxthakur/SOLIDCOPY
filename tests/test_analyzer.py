@@ -249,6 +249,46 @@ class LangfuseReportTests(unittest.TestCase):
         self.assertEqual(report["tools"]["failure_rate_percentage"], 50.0)
         self.assertEqual(report["latency"]["llm_request"]["p50"], 1.0)
 
+    def test_report_only_emits_applicable_latency_metrics(self):
+        from metrics.langfuse_report import aggregate_observations
+
+        report = aggregate_observations([
+            {"name": "llm_request", "latency": 1.0, "time_to_first_token": 0.0},
+            {"name": "tts_request", "latency": 2.0, "ttfb": 0.0},
+            {"name": "stt_request", "latency": 0.5, "audio_duration": 3.0},
+            {"name": "eou_detection", "latency": 0.0, "time_to_first_token": 1.0},
+            {"name": "agent_turn", "latency": 4.0, "time_to_first_token": 1.0},
+            {"name": "agent_session", "latency": 8.0, "time_to_first_token": 1.0},
+        ])
+
+        self.assertEqual(report["canonical"]["llm_request"]["ttft_seconds"]["count"], 1)
+        self.assertEqual(report["canonical"]["llm_request"]["ttft_seconds"]["average"], 0.0)
+        self.assertEqual(report["canonical"]["tts_request"]["ttfb_seconds"]["average"], 0.0)
+        self.assertEqual(
+            report["canonical"]["stt_request"]["audio_duration_seconds"]["average"], 3.0
+        )
+        for name in ("tts_request", "eou_detection", "agent_turn", "agent_session"):
+            self.assertNotIn("ttft_seconds", report["canonical"][name])
+        self.assertIn("session_duration_seconds", report["canonical"]["agent_session"])
+        self.assertNotIn("latency_seconds", report["canonical"]["agent_session"])
+
+    def test_report_preserves_zero_cost_and_zero_latency(self):
+        from metrics.langfuse_report import aggregate_observations
+
+        report = aggregate_observations([
+            {
+                "name": "llm_request",
+                "latency": 0.0,
+                "time_to_first_token": 0.0,
+                "total_cost": 0.0,
+            }
+        ])
+
+        llm = report["canonical"]["llm_request"]
+        self.assertEqual(llm["cost_usd"], 0.0)
+        self.assertEqual(llm["latency_seconds"]["average"], 0.0)
+        self.assertEqual(llm["ttft_seconds"]["average"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

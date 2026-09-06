@@ -22,6 +22,7 @@ from langfuse import Langfuse
 CANONICAL_NAMES = {
     "llm_request",
     "tts_request",
+    "stt_request",
     "user_turn",
     "agent_turn",
     "eou_detection",
@@ -70,13 +71,47 @@ def _obs_get(obs: Any, key: str, default: Any = None) -> Any:
     return getattr(obs, key, default)
 
 
+def _first_not_none(obs: Any, *keys: str) -> Any:
+    for key in keys:
+        value = _obs_get(obs, key)
+        if value is not None:
+            return value
+    return None
+
+
+def _metric_stats(
+    name: str,
+    values: dict[str, list[float]],
+    counts: Counter[str],
+    costs: dict[str, float],
+    latencies: dict[str, list[float]],
+) -> dict[str, Any]:
+    stats: dict[str, Any] = {
+        "count": counts[name],
+        "cost_usd": round(costs[name], 6),
+    }
+    if name == "agent_session":
+        stats["session_duration_seconds"] = _latency_stats(latencies.get(name, []))
+    else:
+        stats["latency_seconds"] = _latency_stats(latencies.get(name, []))
+    if name == "llm_request":
+        stats["ttft_seconds"] = _latency_stats(values.get("ttft", []))
+    elif name == "tts_request":
+        stats["ttfb_seconds"] = _latency_stats(values.get("ttfb", []))
+    elif name == "stt_request":
+        stats["audio_duration_seconds"] = _latency_stats(values.get("audio", []))
+    return stats
+
+
 def aggregate_observations(observations: list[Any]) -> dict[str, Any]:
     """Build a report from Langfuse observation objects or dicts."""
     by_name: Counter[str] = Counter()
     by_type: Counter[str] = Counter()
     by_session: Counter[str] = Counter()
     latencies: dict[str, list[float]] = defaultdict(list)
-    ttfts: dict[str, list[float]] = defaultdict(list)
+    metric_values: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     total_cost = 0.0
     cost_by_name: dict[str, float] = defaultdict(float)
     tool_total = 0
@@ -89,8 +124,13 @@ def aggregate_observations(observations: list[Any]) -> dict[str, Any]:
         session_id = _obs_get(obs, "session_id") or _obs_get(obs, "sessionId")
         level = str(_obs_get(obs, "level") or "DEFAULT").upper()
         latency = _float(_obs_get(obs, "latency"))
-        ttft = _float(_obs_get(obs, "time_to_first_token") or _obs_get(obs, "timeToFirstToken"))
-        cost = _float(_obs_get(obs, "total_cost") or _obs_get(obs, "totalCost")) or 0.0
+        ttft = _float(_first_not_none(obs, "time_to_first_token", "timeToFirstToken"))
+        ttfb = _float(_first_not_none(obs, "time_to_first_byte", "timeToFirstByte", "ttfb"))
+        audio_duration = _float(
+            _first_not_none(obs, "audio_duration", "audioDuration", "audio_duration_seconds")
+        )
+        cost_value = _float(_first_not_none(obs, "total_cost", "totalCost"))
+        cost = cost_value if cost_value is not None else 0.0
 
         by_name[name] += 1
         by_type[obs_type] += 1
@@ -99,7 +139,11 @@ def aggregate_observations(observations: list[Any]) -> dict[str, Any]:
         if latency is not None:
             latencies[name].append(latency)
         if ttft is not None:
-            ttfts[name].append(ttft)
+            metric_values[name]["ttft"].append(ttft)
+        if ttfb is not None:
+            metric_values[name]["ttfb"].append(ttfb)
+        if audio_duration is not None:
+            metric_values[name]["audio"].append(audio_duration)
         total_cost += cost
         cost_by_name[name] += cost
 
@@ -110,12 +154,7 @@ def aggregate_observations(observations: list[Any]) -> dict[str, Any]:
                 tool_errors += 1
 
     named = {
-        name: {
-            "count": by_name[name],
-            "cost_usd": round(cost_by_name[name], 6),
-            "latency_seconds": _latency_stats(latencies.get(name, [])),
-            "ttft_seconds": _latency_stats(ttfts.get(name, [])),
-        }
+        name: _metric_stats(name, metric_values[name], by_name, cost_by_name, latencies)
         for name in CANONICAL_NAMES
         if by_name[name]
     }
@@ -142,11 +181,20 @@ def aggregate_observations(observations: list[Any]) -> dict[str, Any]:
         "latency": {
             "llm_request": _latency_stats(latencies.get("llm_request", [])),
             "tts_request": _latency_stats(latencies.get("tts_request", [])),
+            "stt_request": _latency_stats(latencies.get("stt_request", [])),
+            "eou_detection": _latency_stats(latencies.get("eou_detection", [])),
+            "user_turn": _latency_stats(latencies.get("user_turn", [])),
             "agent_turn": _latency_stats(latencies.get("agent_turn", [])),
+            "agent_session": _latency_stats(latencies.get("agent_session", [])),
         },
         "ttft": {
-            "llm_request": _latency_stats(ttfts.get("llm_request", [])),
-            "tts_request": _latency_stats(ttfts.get("tts_request", [])),
+            "llm_request": _latency_stats(metric_values["llm_request"].get("ttft", [])),
+        },
+        "ttfb": {
+            "tts_request": _latency_stats(metric_values["tts_request"].get("ttfb", [])),
+        },
+        "audio_duration": {
+            "stt_request": _latency_stats(metric_values["stt_request"].get("audio", [])),
         },
     }
 
