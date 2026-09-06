@@ -1,0 +1,233 @@
+import os
+from langfuse import Langfuse
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.util.types import AttributeValue
+from livekit.agents.telemetry import set_tracer_provider
+
+
+import logging
+
+from dotenv import load_dotenv
+from livekit import agents
+from livekit.agents import Agent, AgentServer, AgentSession, JobContext, room_io
+from livekit.plugins import noise_cancellation, silero
+from livekit.agents.inference import TurnDetector
+from livekit.agents import stt, tts, llm, inference
+from livekit.agents import AgentStateChangedEvent, MetricsCollectedEvent, metrics
+from livekit.agents import (
+    ConversationItemAddedEvent,
+    FunctionToolsExecutedEvent,
+    ToolExecutionUpdatedEvent,
+    UserInputTranscribedEvent,
+)
+from livekit.agents import function_tool, RunContext, ToolError
+from livekit.agents import mcp
+from metrics.analyzer import SessionMetricsAccumulator, format_summary, persist_summary
+import json
+import time
+import uuid
+import httpx
+
+
+logger = logging.getLogger(__name__)
+
+load_dotenv()
+
+
+def make_session_id(room_name: str) -> str:
+    """One Langfuse/session summary ID per conversation.
+
+    Console reuses room names like \"console\", so append a UUID there.
+    Production rooms should already be unique — use the room name as-is.
+    """
+    if room_name in {"", "console", "console-room"} or room_name.startswith("console"):
+        return f"{room_name or 'console'}-{uuid.uuid4().hex[:12]}"
+    return room_name
+
+
+
+def setup_langfuse(
+    metadata: dict[str, AttributeValue] | None = None,
+    *,
+    base_url: str | None = None,
+    public_key: str | None = None,
+    secret_key: str | None = None,
+) -> TracerProvider:
+    public_key = public_key or os.getenv("LANGFUSE_PUBLIC_KEY")
+    secret_key = secret_key or os.getenv("LANGFUSE_SECRET_KEY")
+    base_url = base_url or os.getenv("LANGFUSE_BASE_URL") or os.getenv("LANGFUSE_HOST")
+    if not public_key or not secret_key or not base_url:
+        raise ValueError(
+            "LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, and LANGFUSE_BASE_URL (or LANGFUSE_HOST) must be set"
+        )
+    trace_provider = TracerProvider()
+    set_tracer_provider(trace_provider, metadata=metadata)
+    Langfuse(
+        public_key=public_key,
+        secret_key=secret_key,
+        base_url=base_url,
+        tracer_provider=trace_provider,
+        should_export_span=lambda span: True,
+    )
+    return trace_provider
+
+
+    
+
+
+# Define your agent's behavior by extending the Agent class
+class Assistant(Agent):
+    def __init__(self) -> None:
+        super().__init__(
+            instructions=(
+                "You are an upbeat, slightly sarcastic voice AI for tech support. "
+                "Help the caller fix issues without rambling, and keep replies under 3 sentences. "
+                "You can answer questions about "
+                "LiveKit by searching the documentation. When users ask about LiveKit "
+                "features, APIs, or how to build something, use the docs search tools "
+                "to find accurate information."
+            ),  # System prompt for the LLM
+        )
+
+
+server = AgentServer()
+
+
+# The entrypoint function runs when a participant joins the room
+@server.rtc_session()
+async def entrypoint(ctx: JobContext):
+
+    session_id = make_session_id(ctx.room.name)
+    session_metrics = SessionMetricsAccumulator(
+        session_id=session_id,
+        llm_model="openai/gpt-4.1-mini",
+        stt_model="deepgram/nova-3:en",
+        tts_model="cartesia/sonic-3",
+    )
+    logger.info("Session id: %s (room=%s)", session_id, ctx.room.name)
+
+    trace_provider = setup_langfuse(
+        metadata={
+            "langfuse.session.id": session_id,
+        }
+    )
+    
+    async def flush_trace():
+        trace_provider.force_flush()
+    
+    ctx.add_shutdown_callback(flush_trace)
+
+
+    # Configure the voice pipeline with STT, LLM, TTS, and VAD providers
+    session = AgentSession(
+
+        stt="deepgram/nova-3:en",
+        # stt="assemblyai/universal-streaming:en",
+        llm="openai/gpt-4.1-mini",
+        tts="cartesia/sonic-3",
+        vad=silero.VAD.load(),
+        turn_detection=TurnDetector(),
+        # preemptive_generation=True,
+        #mcp_servers=[mcp.MCPServerHTTP(url="http://docs.livekit.io/mcp"),],
+        tools=[
+            mcp.MCPToolset(id="livekit-docs", mcp_server=mcp.MCPServerHTTP(url="http://docs.livekit.io/mcp"),),
+            #get_airtable_toolset(),
+        ],
+    )
+
+
+    # Track End of Utterance timing (when turn detector decides user finished speaking)
+    last_eou_metrics: metrics.EOUMetrics | None = None
+    summary_logged = False
+
+    @session.on("metrics_collected")
+    def _on_metrics_collected(ev: MetricsCollectedEvent):
+        nonlocal last_eou_metrics
+
+        if ev.metrics.type == "eou_metrics":
+            last_eou_metrics = ev.metrics
+
+        session_metrics.collect(ev.metrics)
+
+    @session.on("user_input_transcribed")
+    def _on_user_input_transcribed(ev: UserInputTranscribedEvent):
+        if ev.is_final:
+            session_metrics.note_final_transcript()
+
+    @session.on("conversation_item_added")
+    def _on_conversation_item_added(ev: ConversationItemAddedEvent):
+        session_metrics.note_assistant_message(ev.item)
+        try:
+            path = session_metrics.checkpoint_after_turn()
+            if path:
+                logger.info("Session metrics checkpoint saved: %s", path)
+        except OSError:
+            logger.exception("Failed to save session metrics checkpoint")
+
+    @session.on("function_tools_executed")
+    def _on_function_tools_executed(ev: FunctionToolsExecutedEvent):
+        session_metrics.note_function_tools_executed(
+            ev.function_calls, ev.function_call_outputs
+        )
+
+    @session.on("tool_execution_updated")
+    def _on_tool_execution_updated(ev: ToolExecutionUpdatedEvent):
+        update = ev.update
+        update_type = getattr(update, "type", None)
+        if update_type == "tool_call_started":
+            call = update.function_call
+            session_metrics.note_tool_started(
+                call.call_id, getattr(call, "name", None)
+            )
+        elif update_type == "tool_call_ended":
+            session_metrics.note_tool_ended(update.call_id, getattr(update, "status", None))
+
+    @session.on("agent_state_changed")
+    def _on_agent_state_changed(ev: AgentStateChangedEvent):
+        nonlocal last_eou_metrics
+        if ev.new_state == "speaking" and last_eou_metrics is not None:
+            elapsed = time.time() - last_eou_metrics.timestamp
+            session_metrics.note_ttfa(elapsed)
+            last_eou_metrics = None
+
+    async def log_usage(reason: str = "shutdown") -> None:
+        # Exactly once per entrypoint: duplicate prints were from dual log handlers,
+        # not double calculation — still guard against re-entrant shutdown.
+        nonlocal summary_logged
+        if summary_logged:
+            logger.debug("Skipping duplicate session metrics summary (reason=%s)", reason)
+            return
+        summary_logged = True
+
+        session_summary = session_metrics.summary()
+        logger.info("\n%s", format_summary(session_summary))
+        logger.info("Session metrics JSON: %s", json.dumps(session_summary))
+        try:
+            path = persist_summary(session_summary)
+            logger.info("Session metrics saved: %s", path)
+        except OSError:
+            logger.exception("Failed to persist session metrics summary")
+
+
+    # Fire log_usage when worker shuts down
+    ctx.add_shutdown_callback(log_usage)
+
+
+    # Start the session with noise cancellation enabled
+    await session.start(
+        agent=Assistant(),
+        room=ctx.room,
+        room_options=room_io.RoomOptions(
+            audio_input=room_io.AudioInputOptions(
+                noise_cancellation=noise_cancellation.BVC(),  # Background voice cancellation
+            ),
+        ),
+        # record=False to disable tracking of this agent
+    )
+
+
+if __name__ == "__main__":
+    # Do not call logging.basicConfig here: LiveKit's CLI attaches its own root
+    # handler. basicConfig would add a second StreamHandler and print every
+    # shutdown log twice in two different formats.
+    agents.cli.run_app(server)

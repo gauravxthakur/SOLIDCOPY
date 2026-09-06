@@ -144,6 +144,157 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
         self.assertEqual(summary["tools"]["successful_count"], 1)
         self.assertGreaterEqual(summary["tools"]["duration_seconds"]["count"], 1)
 
+    def test_turn_records_usage_text_and_tool_latency(self):
+        accumulator = SessionMetricsAccumulator(session_id="session-1")
+
+        class Msg:
+            role = "assistant"
+            text = "Here is the answer."
+            interrupted = True
+            metrics = {"e2e_latency": 3.25}
+
+        accumulator.collect(self.llm(100, 20, 60, ttft=1.2, speed=16))
+        accumulator.collect(self.tts(duration=1.0, audio=2.5, characters=24))
+        accumulator.collect(self.stt(4.0))
+        accumulator.note_tool_started("tool-1", "docs_search")
+        accumulator.note_tool_ended("tool-1", "done")
+        accumulator.note_assistant_message(Msg())
+
+        record = accumulator.summary()["turns"]["records"][0]
+        self.assertEqual(record["session_id"], "session-1")
+        self.assertEqual(record["turn_id"], "turn-0001")
+        self.assertEqual(record["text"], "Here is the answer.")
+        self.assertEqual(record["llm_model"], "openai/gpt-4.1-mini")
+        self.assertEqual(record["prompt_tokens"], 100)
+        self.assertEqual(record["cached_prompt_tokens"], 60)
+        self.assertEqual(record["uncached_prompt_tokens"], 40)
+        self.assertEqual(record["completion_tokens"], 20)
+        self.assertEqual(record["ttft_seconds"], 1.2)
+        self.assertEqual(record["tokens_per_second"], 16.0)
+        self.assertEqual(record["tts_characters"], 24)
+        self.assertEqual(record["tts_audio_seconds"], 2.5)
+        self.assertEqual(record["stt_audio_seconds"], 4.0)
+        self.assertEqual(record["tool_names"], ["docs_search"])
+        self.assertEqual(len(record["tool_latency_seconds"]), 1)
+        self.assertGreaterEqual(record["tool_latency_seconds"][0], 0)
+        self.assertEqual(record["turn_duration_seconds"], 3.25)
+        self.assertTrue(record["interrupted"])
+
+    def test_turn_and_session_costs_use_configured_rate_card(self):
+        from metrics.analyzer import SessionMetricsAccumulator
+        from metrics.costs import RateCard
+
+        rate_card = RateCard.from_dict({
+            "llm": {
+                "openai/gpt-4.1-mini": {
+                    "cached_input_per_token": "0.000001",
+                    "uncached_input_per_token": "0.000002",
+                    "completion_per_token": "0.000003",
+                }
+            },
+            "stt": {
+                "assemblyai/universal-streaming": {"per_audio_second": "0.0001"}
+            },
+            "tts": {
+                "cartesia/sonic-3": {
+                    "per_character": "0.00001",
+                    "billing_basis": "characters",
+                }
+            },
+        })
+        accumulator = SessionMetricsAccumulator(session_id="session-cost", rate_card=rate_card)
+
+        class Msg:
+            role = "assistant"
+            text = "Done"
+            interrupted = False
+            metrics = {"e2e_latency": 1.0}
+
+        accumulator.collect(self.llm(100, 20, 60))
+        accumulator.collect(self.tts(duration=1.0, audio=2.5, characters=24))
+        accumulator.collect(self.stt(4.0))
+        accumulator.note_assistant_message(Msg())
+
+        summary = accumulator.summary()
+        breakdown = summary["turns"]["records"][0]["cost_breakdown"]
+        self.assertEqual(breakdown["status"], "measured")
+        self.assertEqual(breakdown["total_cost_usd"], 0.00084)
+        self.assertEqual(summary["cost_breakdown"]["total_cost_usd"], 0.00084)
+        self.assertEqual(summary["cost_breakdown"]["lines"]["llm"]["status"], "measured")
+
+    def test_missing_rate_is_not_reported_as_zero_cost(self):
+        accumulator = SessionMetricsAccumulator()
+
+        class Msg:
+            role = "assistant"
+            interrupted = False
+            metrics = {}
+
+        accumulator.collect(self.llm(10, 2, 5))
+        accumulator.note_assistant_message(Msg())
+
+        summary = accumulator.summary()
+        self.assertEqual(summary["cost_breakdown"]["lines"]["llm"]["status"], "missing_rate")
+        self.assertIsNone(summary["cost_breakdown"]["lines"]["llm"]["cost_usd"])
+        self.assertEqual(summary["cost_breakdown"]["total_cost_usd"], 0)
+
+    def test_credit_simulation_tracks_plan_balance_usage_and_revenue(self):
+        from decimal import Decimal
+
+        from metrics.analyzer import SessionMetricsAccumulator
+        from metrics.costs import CreditAccount
+
+        account = CreditAccount(
+            plan_name="standard",
+            customer_rate_per_second=Decimal("0.10"),
+            credit_balance=Decimal("100"),
+        )
+        accumulator = SessionMetricsAccumulator(
+            session_id="credits-1",
+            credit_account=account,
+        )
+
+        class Msg:
+            role = "assistant"
+            interrupted = False
+            metrics = {"e2e_latency": 12.5}
+
+        accumulator.note_assistant_message(Msg())
+        summary = accumulator.summary()
+        credit = summary["credit_simulation"]
+        self.assertEqual(credit["plan_name"], "standard")
+        self.assertEqual(credit["credits_used"], 12.5)
+        self.assertEqual(credit["credits_remaining"], 87.5)
+        self.assertEqual(credit["projected_seconds_left"], 87.5)
+        self.assertEqual(credit["customer_revenue_inr"], 1.25)
+        self.assertEqual(
+            summary["turns"]["records"][0]["credit_simulation"]["credits_used"],
+            12.5,
+        )
+
+    def test_checkpoint_writes_after_turn_and_deduplicates_turn_key(self):
+        import tempfile
+
+        accumulator = SessionMetricsAccumulator(session_id="checkpoint-1")
+
+        class Msg:
+            role = "assistant"
+            interrupted = False
+            metrics = {"e2e_latency": 2.0}
+
+        accumulator.note_assistant_message(Msg())
+        with tempfile.TemporaryDirectory() as tmp:
+            first = accumulator.checkpoint_after_turn(tmp)
+            second = accumulator.checkpoint_after_turn(tmp)
+            self.assertEqual(first, second)
+            loaded = json.loads(first.read_text(encoding="utf-8"))
+            records = loaded["turns"]["records"]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(
+                f"{loaded['session']['session_id']}:{records[0]['turn_id']}",
+                "checkpoint-1:turn-0001",
+            )
+
     def test_interruption_durations_remain_separate(self):
         accumulator = SessionMetricsAccumulator()
         accumulator.collect(metrics.InterruptionMetrics(
@@ -201,6 +352,186 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
 
 
 class LangfuseReportTests(unittest.TestCase):
+    def test_compare_session_reads_object_shaped_langfuse_usage(self):
+        from types import SimpleNamespace
+
+        from metrics.costs import RateCard
+        from metrics.langfuse_report import compare_session
+
+        class Observation:
+            name = "llm_request"
+            model = "openai/gpt-4.1-mini"
+            total_cost = 0.0001
+            time_to_first_token = 0.4
+            usage_details = SimpleNamespace(
+                input=100,
+                output=20,
+                input_token_details=SimpleNamespace(cached_tokens=60),
+            )
+
+        result = compare_session(
+            {
+                "session": {"session_id": "object-session"},
+                "llm": {},
+                "turns": {"records": []},
+            },
+            [Observation()],
+            RateCard(),
+        )
+
+        langfuse = result["llm"]["langfuse"]
+        self.assertEqual(langfuse["model"], ["openai/gpt-4.1-mini"])
+        self.assertEqual(langfuse["input_tokens"], 100)
+        self.assertEqual(langfuse["cached_tokens"], 60)
+        self.assertEqual(langfuse["completion_tokens"], 20)
+        self.assertEqual(langfuse["cost_usd"], 0.0001)
+        self.assertEqual(langfuse["ttft_seconds"]["count"], 1)
+
+    def test_compare_session_reports_unavailable_cached_usage_as_none(self):
+        from types import SimpleNamespace
+
+        from metrics.costs import RateCard
+        from metrics.langfuse_report import compare_session
+
+        observation = SimpleNamespace(
+            name="llm_request",
+            model="openai/gpt-4.1-mini",
+            usage_details=SimpleNamespace(input=100, output=20),
+            total_cost=0.0001,
+            time_to_first_token=0.4,
+        )
+        result = compare_session(
+            {"session": {"session_id": "no-cache-field"}, "turns": {"records": []}},
+            [observation],
+            RateCard(),
+        )
+
+        self.assertIsNone(result["llm"]["langfuse"]["cached_tokens"])
+
+    def test_compare_session_marks_used_stt_tts_without_rates_as_missing_rate(self):
+        from metrics.costs import RateCard
+        from metrics.langfuse_report import compare_session
+
+        result = compare_session(
+            {
+                "session": {"session_id": "used-no-rates"},
+                "turns": {
+                    "records": [
+                        {
+                            "stt_model": "deepgram/nova-3:en",
+                            "stt_audio_seconds": 4,
+                            "tts_model": "cartesia/sonic-3",
+                            "tts_characters": 20,
+                            "tts_audio_seconds": 2,
+                        }
+                    ]
+                },
+            },
+            [],
+            RateCard(),
+        )
+
+        self.assertEqual(result["own_rate_card_costs"]["stt"]["status"], "missing_rate")
+        self.assertEqual(result["own_rate_card_costs"]["tts"]["status"], "missing_rate")
+
+    def test_compare_session_marks_unused_stt_tts_not_applicable(self):
+        from metrics.costs import RateCard
+        from metrics.langfuse_report import compare_session
+
+        result = compare_session(
+            {"session": {"session_id": "unused"}, "turns": {"records": [{}]}},
+            [],
+            RateCard(),
+        )
+
+        self.assertEqual(result["own_rate_card_costs"]["stt"]["status"], "not_applicable")
+        self.assertEqual(result["own_rate_card_costs"]["tts"]["status"], "not_applicable")
+
+    def test_compare_session_reports_request_count_mismatch(self):
+        from metrics.costs import RateCard
+        from metrics.langfuse_report import compare_session
+
+        result = compare_session(
+            {
+                "session": {"session_id": "count-check"},
+                "llm": {"request_count": 5},
+                "turns": {"records": []},
+            },
+            [
+                {"name": "llm_request", "session_id": "count-check"},
+                {"name": "llm_request", "session_id": "count-check"},
+                {"name": "llm_request", "session_id": "other-session"},
+            ],
+            RateCard(),
+        )
+
+        check = result["request_count_check"]
+        self.assertEqual(check["status"], "mismatch")
+        self.assertEqual(check["local"], 5)
+        self.assertEqual(check["langfuse"], 2)
+        self.assertEqual(check["difference"], -3)
+
+    def test_compare_session_checks_llm_and_calculates_local_stt_tts_costs(self):
+        from metrics.costs import RateCard
+        from metrics.langfuse_report import compare_session
+
+        local_summary = {
+            "session": {"session_id": "s1"},
+            "cost_breakdown": {"lines": {}},
+            "turns": {
+                "records": [
+                    {
+                        "llm_model": "openai/gpt-4.1-mini",
+                        "prompt_tokens": 100,
+                        "cached_prompt_tokens": 60,
+                        "completion_tokens": 20,
+                        "ttft_seconds": 0.4,
+                        "stt_model": "deepgram/nova-3:en",
+                        "stt_audio_seconds": 4,
+                        "tts_model": "cartesia/sonic-3",
+                        "tts_characters": 24,
+                        "tts_audio_seconds": 2,
+                    }
+                ]
+            },
+        }
+        rate_card = RateCard.from_dict({
+            "llm": {
+                "openai/gpt-4.1-mini": {
+                    "cached_input_per_token": "0.000001",
+                    "uncached_input_per_token": "0.000002",
+                    "completion_per_token": "0.000003",
+                }
+            },
+            "stt": {"deepgram/nova-3:en": {"per_audio_second": "0.01"}},
+            "tts": {
+                "cartesia/sonic-3": {
+                    "per_character": "0.001",
+                    "billing_basis": "characters",
+                }
+            },
+        })
+        result = compare_session(
+            local_summary,
+            [{
+                "name": "llm_request",
+                "model": "openai/gpt-4.1-mini",
+                "input_tokens": 100,
+                "cached_input_tokens": 60,
+                "output_tokens": 20,
+                "time_to_first_token": 0.4,
+                "total_cost": 0.0001,
+            }],
+            rate_card,
+        )
+
+        self.assertEqual(result["llm"]["local"]["request_count"], 1)
+        self.assertEqual(result["llm"]["langfuse"]["request_count"], 1)
+        self.assertEqual(result["llm"]["differences"]["input_tokens"]["local"], 100)
+        self.assertEqual(result["llm"]["langfuse"]["cost_usd"], 0.0001)
+        self.assertEqual(result["own_rate_card_costs"]["stt"]["cost_usd"], 0.04)
+        self.assertEqual(result["own_rate_card_costs"]["tts"]["cost_usd"], 0.024)
+
     def test_aggregate_uses_exact_names_and_tool_failure_rate(self):
         from metrics.langfuse_report import aggregate_observations
 
@@ -248,6 +579,46 @@ class LangfuseReportTests(unittest.TestCase):
         self.assertEqual(report["tools"]["error_count"], 1)
         self.assertEqual(report["tools"]["failure_rate_percentage"], 50.0)
         self.assertEqual(report["latency"]["llm_request"]["p50"], 1.0)
+
+    def test_report_only_emits_applicable_latency_metrics(self):
+        from metrics.langfuse_report import aggregate_observations
+
+        report = aggregate_observations([
+            {"name": "llm_request", "latency": 1.0, "time_to_first_token": 0.0},
+            {"name": "tts_request", "latency": 2.0, "ttfb": 0.0},
+            {"name": "stt_request", "latency": 0.5, "audio_duration": 3.0},
+            {"name": "eou_detection", "latency": 0.0, "time_to_first_token": 1.0},
+            {"name": "agent_turn", "latency": 4.0, "time_to_first_token": 1.0},
+            {"name": "agent_session", "latency": 8.0, "time_to_first_token": 1.0},
+        ])
+
+        self.assertEqual(report["canonical"]["llm_request"]["ttft_seconds"]["count"], 1)
+        self.assertEqual(report["canonical"]["llm_request"]["ttft_seconds"]["average"], 0.0)
+        self.assertEqual(report["canonical"]["tts_request"]["ttfb_seconds"]["average"], 0.0)
+        self.assertEqual(
+            report["canonical"]["stt_request"]["audio_duration_seconds"]["average"], 3.0
+        )
+        for name in ("tts_request", "eou_detection", "agent_turn", "agent_session"):
+            self.assertNotIn("ttft_seconds", report["canonical"][name])
+        self.assertIn("session_duration_seconds", report["canonical"]["agent_session"])
+        self.assertNotIn("latency_seconds", report["canonical"]["agent_session"])
+
+    def test_report_preserves_zero_cost_and_zero_latency(self):
+        from metrics.langfuse_report import aggregate_observations
+
+        report = aggregate_observations([
+            {
+                "name": "llm_request",
+                "latency": 0.0,
+                "time_to_first_token": 0.0,
+                "total_cost": 0.0,
+            }
+        ])
+
+        llm = report["canonical"]["llm_request"]
+        self.assertEqual(llm["cost_usd"], 0.0)
+        self.assertEqual(llm["latency_seconds"]["average"], 0.0)
+        self.assertEqual(llm["ttft_seconds"]["average"], 0.0)
 
 
 if __name__ == "__main__":
