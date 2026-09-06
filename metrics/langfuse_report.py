@@ -206,11 +206,43 @@ def _usage_value(obs: Any, *keys: str) -> float | None:
     if value is not None:
         return _float(value)
     usage = _first_not_none(obs, "usage", "usage_details", "usageDetails")
-    if isinstance(usage, dict):
-        for key in keys:
-            if key in usage:
-                return _float(usage[key])
+    if usage is not None:
+        value = _first_not_none(usage, *keys)
+        if value is not None:
+            return _float(value)
+        if "input_tokens" in keys or "prompt_tokens" in keys:
+            value = _first_not_none(usage, "input", "prompt", "inputTokens", "promptTokens")
+            if value is not None:
+                return _float(value)
+        if "output_tokens" in keys or "completion_tokens" in keys:
+            value = _first_not_none(
+                usage,
+                "output",
+                "completion",
+                "outputTokens",
+                "completionTokens",
+            )
+            if value is not None:
+                return _float(value)
+        if "cached_input_tokens" in keys or "prompt_cached_tokens" in keys:
+            details = _first_not_none(
+                usage,
+                "input_token_details",
+                "inputTokenDetails",
+                "prompt_token_details",
+                "promptTokenDetails",
+            )
+            if details is not None:
+                value = _first_not_none(details, "cached_tokens", "cachedTokens")
+                if value is not None:
+                    return _float(value)
     return None
+
+
+def _sum_usage(observations: list[Any], *keys: str) -> float | None:
+    values = [_usage_value(observation, *keys) for observation in observations]
+    present = [value for value in values if value is not None]
+    return sum(present) if present else None
 
 
 def _local_llm_summary(session_summary: dict[str, Any]) -> dict[str, Any]:
@@ -270,14 +302,11 @@ def compare_session(
             _usage_value(observation, "input_tokens", "prompt_tokens", "inputTokens", "promptTokens") or 0
             for observation in langfuse_llm
         ),
-        "cached_tokens": sum(
-            _usage_value(
-                observation,
-                "cached_input_tokens",
-                "prompt_cached_tokens",
-                "cachedTokens",
-            ) or 0
-            for observation in langfuse_llm
+        "cached_tokens": _sum_usage(
+            langfuse_llm,
+            "cached_input_tokens",
+            "prompt_cached_tokens",
+            "cachedTokens",
         ),
         "completion_tokens": sum(
             _usage_value(

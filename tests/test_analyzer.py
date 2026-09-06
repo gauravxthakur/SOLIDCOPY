@@ -352,6 +352,62 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
 
 
 class LangfuseReportTests(unittest.TestCase):
+    def test_compare_session_reads_object_shaped_langfuse_usage(self):
+        from types import SimpleNamespace
+
+        from metrics.costs import RateCard
+        from metrics.langfuse_report import compare_session
+
+        class Observation:
+            name = "llm_request"
+            model = "openai/gpt-4.1-mini"
+            total_cost = 0.0001
+            time_to_first_token = 0.4
+            usage_details = SimpleNamespace(
+                input=100,
+                output=20,
+                input_token_details=SimpleNamespace(cached_tokens=60),
+            )
+
+        result = compare_session(
+            {
+                "session": {"session_id": "object-session"},
+                "llm": {},
+                "turns": {"records": []},
+            },
+            [Observation()],
+            RateCard(),
+        )
+
+        langfuse = result["llm"]["langfuse"]
+        self.assertEqual(langfuse["model"], ["openai/gpt-4.1-mini"])
+        self.assertEqual(langfuse["input_tokens"], 100)
+        self.assertEqual(langfuse["cached_tokens"], 60)
+        self.assertEqual(langfuse["completion_tokens"], 20)
+        self.assertEqual(langfuse["cost_usd"], 0.0001)
+        self.assertEqual(langfuse["ttft_seconds"]["count"], 1)
+
+    def test_compare_session_reports_unavailable_cached_usage_as_none(self):
+        from types import SimpleNamespace
+
+        from metrics.costs import RateCard
+        from metrics.langfuse_report import compare_session
+
+        observation = SimpleNamespace(
+            name="llm_request",
+            model="openai/gpt-4.1-mini",
+            usage_details=SimpleNamespace(input=100, output=20),
+            total_cost=0.0001,
+            time_to_first_token=0.4,
+        )
+        result = compare_session(
+            {"session": {"session_id": "no-cache-field"}, "turns": {"records": []}},
+            [observation],
+            RateCard(),
+        )
+
+        self.assertIsNone(result["llm"]["langfuse"]["cached_tokens"])
+
     def test_compare_session_checks_llm_and_calculates_local_stt_tts_costs(self):
         from metrics.costs import RateCard
         from metrics.langfuse_report import compare_session
