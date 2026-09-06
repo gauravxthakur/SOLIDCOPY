@@ -19,6 +19,7 @@ from livekit.agents.metrics import (
     TTSMetrics,
     VADMetrics,
 )
+from metrics.costs import CostCalculator, RateCard
 
 
 @dataclass
@@ -56,6 +57,10 @@ class SessionMetricsAccumulator:
     """Accumulates one running LiveKit agent session without reading exports."""
 
     session_id: str | None = None
+    rate_card: RateCard | None = None
+    llm_model: str | None = None
+    stt_model: str | None = None
+    tts_model: str | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     _started_monotonic: float = field(default_factory=time.monotonic, repr=False)
     metric_event_count: int = 0
@@ -119,6 +124,11 @@ class SessionMetricsAccumulator:
     _tool_started_at: dict[str, float] = field(default_factory=dict, repr=False)
     _tool_names: dict[str, str] = field(default_factory=dict, repr=False)
     _pending_turn: dict[str, Any] | None = field(default=None, repr=False)
+    _cost_calculator: CostCalculator = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.rate_card = self.rate_card or RateCard.from_environment()
+        self._cost_calculator = CostCalculator(self.rate_card)
 
     def collect(self, metric: Any) -> None:
         self.metric_event_count += 1
@@ -177,7 +187,7 @@ class SessionMetricsAccumulator:
         self.llm_duration.add(getattr(metric, "duration", None))
         self.llm_ttft.add(getattr(metric, "ttft", None))
         self.llm_tokens_per_second.add(getattr(metric, "tokens_per_second", None))
-        self._count_model(self.llm_models, metric)
+        turn["llm_model"] = self.llm_model or self._model_name(metric) or turn["llm_model"]
         self._add_turn_llm(
             turn,
             metric,
@@ -199,6 +209,7 @@ class SessionMetricsAccumulator:
         self.tts_streamed += int(bool(getattr(metric, "streamed", False)))
         self._count_model(self.tts_models, metric)
         turn["tts_requests"] += 1
+        turn["tts_model"] = self.tts_model or self._model_name(metric) or turn["tts_model"]
         self._add_turn_value(turn, "tts_characters", characters)
         self._add_turn_seconds(turn, "tts_audio_seconds", audio_duration)
 
@@ -210,6 +221,7 @@ class SessionMetricsAccumulator:
         self.stt_duration.add(getattr(metric, "duration", None))
         self._count_model(self.stt_models, metric)
         turn["stt_requests"] += 1
+        turn["stt_model"] = self.stt_model or self._model_name(metric) or turn["stt_model"]
         self._add_turn_seconds(turn, "stt_audio_seconds", audio_duration)
 
     def _collect_eou(self, metric: EOUMetrics) -> None:
@@ -249,9 +261,11 @@ class SessionMetricsAccumulator:
             "ttft_seconds": None,
             "tokens_per_second": None,
             "tts_requests": 0,
+            "tts_model": None,
             "tts_characters": 0,
             "tts_audio_seconds": 0.0,
             "stt_requests": 0,
+            "stt_model": None,
             "stt_audio_seconds": 0.0,
             "tool_calls_by_id": {},
             "started_monotonic": time.monotonic(),
@@ -380,6 +394,7 @@ class SessionMetricsAccumulator:
         turn["text"] = self._item_text(item)
         turn["interrupted"] = bool(getattr(item, "interrupted", False))
         turn["turn_duration_seconds"] = self._turn_duration(turn, report)
+        turn["cost_breakdown"] = self._cost_calculator.calculate_turn(turn)
         self.turns.append(self._finalize_turn(turn))
         self._pending_turn = None
 
@@ -458,6 +473,37 @@ class SessionMetricsAccumulator:
             total_prompt_tokens - self.llm_cached_prompt_tokens, 0
         )
         ended_at = datetime.now(timezone.utc)
+        turn_costs = [record.get("cost_breakdown") for record in self.turns]
+        line_values = {"llm": [], "stt": [], "tts": []}
+        line_statuses = {"llm": [], "stt": [], "tts": []}
+        for breakdown in turn_costs:
+            if not breakdown:
+                continue
+            for name, line in breakdown["lines"].items():
+                line_statuses[name].append(line["status"])
+                if line["status"] == "measured":
+                    line_values[name].append(line["cost_usd"])
+        cost_breakdown = {
+            "currency": "USD",
+            "total_cost_usd": round(sum(
+                value for values in line_values.values() for value in values
+            ), 6),
+            "lines": {
+                name: {
+                    "status": (
+                        "missing_rate" if "missing_rate" in line_statuses[name]
+                        else "measured" if line_values[name]
+                        else "not_applicable"
+                    ),
+                    "cost_usd": round(sum(line_values[name]), 6) if line_values[name] else None,
+                }
+                for name in line_values
+            },
+            "turns_with_missing_rates": sum(
+                bool(breakdown and breakdown["status"] == "missing_rate")
+                for breakdown in turn_costs
+            ),
+        }
         return {
             "session": {
                 "session_id": self.session_id,
@@ -466,6 +512,7 @@ class SessionMetricsAccumulator:
                 "duration_seconds": round(time.monotonic() - self._started_monotonic, 3),
             },
             "events": {"metric_event_count": self.metric_event_count},
+            "cost_breakdown": cost_breakdown,
             "llm": {
                 "request_count": self.llm_requests,
                 "prompt_tokens": total_prompt_tokens,

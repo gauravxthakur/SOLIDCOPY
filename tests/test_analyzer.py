@@ -180,6 +180,64 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
         self.assertEqual(record["turn_duration_seconds"], 3.25)
         self.assertTrue(record["interrupted"])
 
+    def test_turn_and_session_costs_use_configured_rate_card(self):
+        from metrics.analyzer import SessionMetricsAccumulator
+        from metrics.costs import RateCard
+
+        rate_card = RateCard.from_dict({
+            "llm": {
+                "openai/gpt-4.1-mini": {
+                    "cached_input_per_token": "0.000001",
+                    "uncached_input_per_token": "0.000002",
+                    "completion_per_token": "0.000003",
+                }
+            },
+            "stt": {
+                "assemblyai/universal-streaming": {"per_audio_second": "0.0001"}
+            },
+            "tts": {
+                "cartesia/sonic-3": {
+                    "per_character": "0.00001",
+                    "billing_basis": "characters",
+                }
+            },
+        })
+        accumulator = SessionMetricsAccumulator(session_id="session-cost", rate_card=rate_card)
+
+        class Msg:
+            role = "assistant"
+            text = "Done"
+            interrupted = False
+            metrics = {"e2e_latency": 1.0}
+
+        accumulator.collect(self.llm(100, 20, 60))
+        accumulator.collect(self.tts(duration=1.0, audio=2.5, characters=24))
+        accumulator.collect(self.stt(4.0))
+        accumulator.note_assistant_message(Msg())
+
+        summary = accumulator.summary()
+        breakdown = summary["turns"]["records"][0]["cost_breakdown"]
+        self.assertEqual(breakdown["status"], "measured")
+        self.assertEqual(breakdown["total_cost_usd"], 0.00084)
+        self.assertEqual(summary["cost_breakdown"]["total_cost_usd"], 0.00084)
+        self.assertEqual(summary["cost_breakdown"]["lines"]["llm"]["status"], "measured")
+
+    def test_missing_rate_is_not_reported_as_zero_cost(self):
+        accumulator = SessionMetricsAccumulator()
+
+        class Msg:
+            role = "assistant"
+            interrupted = False
+            metrics = {}
+
+        accumulator.collect(self.llm(10, 2, 5))
+        accumulator.note_assistant_message(Msg())
+
+        summary = accumulator.summary()
+        self.assertEqual(summary["cost_breakdown"]["lines"]["llm"]["status"], "missing_rate")
+        self.assertIsNone(summary["cost_breakdown"]["lines"]["llm"]["cost_usd"])
+        self.assertEqual(summary["cost_breakdown"]["total_cost_usd"], 0)
+
     def test_interruption_durations_remain_separate(self):
         accumulator = SessionMetricsAccumulator()
         accumulator.collect(metrics.InterruptionMetrics(

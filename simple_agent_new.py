@@ -98,7 +98,12 @@ server = AgentServer()
 async def entrypoint(ctx: JobContext):
 
     session_id = make_session_id(ctx.room.name)
-    session_metrics = SessionMetricsAccumulator(session_id=session_id)
+    session_metrics = SessionMetricsAccumulator(
+        session_id=session_id,
+        llm_model="openai/gpt-4.1-mini",
+        stt_model="deepgram/nova-3:en",
+        tts_model="cartesia/sonic-3",
+    )
     logger.info("Session id: %s (room=%s)", session_id, ctx.room.name)
 
     trace_provider = setup_langfuse(
