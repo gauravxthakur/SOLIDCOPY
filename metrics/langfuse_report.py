@@ -285,6 +285,20 @@ def compare_session(
 ) -> dict[str, Any]:
     """Compare one local session summary with its exact Langfuse observations."""
     session_id = (session_summary.get("session") or {}).get("session_id")
+    observation_session_ids = {
+        str(observation_session_id)
+        for observation in observations
+        for observation_session_id in [
+            _first_not_none(observation, "session_id", "sessionId")
+        ]
+        if observation_session_id is not None
+    }
+    if session_id and observation_session_ids:
+        observations = [
+            observation
+            for observation in observations
+            if str(_first_not_none(observation, "session_id", "sessionId")) == str(session_id)
+        ]
     langfuse_llm = [
         observation
         for observation in observations
@@ -330,6 +344,8 @@ def compare_session(
         ), 6),
     }
     local = _local_llm_summary(session_summary)
+    langfuse_request_count = langfuse_summary["request_count"]
+    local_request_count = local["request_count"]
     local_costs = {"llm": [], "stt": [], "tts": []}
     local_cost_statuses = {"llm": [], "stt": [], "tts": []}
     calculator = CostCalculator(rate_card)
@@ -371,6 +387,12 @@ def compare_session(
                     "ttft_seconds",
                 )
             },
+        },
+        "request_count_check": {
+            "status": "match" if local_request_count == langfuse_request_count else "mismatch",
+            "local": local_request_count,
+            "langfuse": langfuse_request_count,
+            "difference": langfuse_request_count - local_request_count,
         },
         "own_rate_card_costs": {
             "stt": own_costs["stt"],
@@ -465,7 +487,7 @@ def main() -> None:
     )
     parser.add_argument("--hours", type=float, default=24, help="Lookback window (default 24)")
     args = parser.parse_args()
-    report = build_report(session_id=args.session_id, hours=args.hours)
+    session_summary = None
     if args.session_json:
         session_summary = json.loads(Path(args.session_json).read_text(encoding="utf-8"))
         session_id = (session_summary.get("session") or {}).get("session_id")
@@ -473,6 +495,9 @@ def main() -> None:
             raise ValueError("Local session JSON does not contain session.session_id")
         if args.session_id and args.session_id != session_id:
             raise ValueError("--session-id does not match session.session_id in --session-json")
+        args.session_id = session_id
+    report = build_report(session_id=args.session_id, hours=args.hours)
+    if session_summary is not None:
         rate_card = RateCard.from_json(args.rate_card) if args.rate_card else RateCard.from_environment()
         report["session_comparison"] = compare_session(
             session_summary,

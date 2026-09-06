@@ -447,6 +447,30 @@ class LangfuseReportTests(unittest.TestCase):
         self.assertEqual(result["own_rate_card_costs"]["stt"]["status"], "not_applicable")
         self.assertEqual(result["own_rate_card_costs"]["tts"]["status"], "not_applicable")
 
+    def test_compare_session_reports_request_count_mismatch(self):
+        from metrics.costs import RateCard
+        from metrics.langfuse_report import compare_session
+
+        result = compare_session(
+            {
+                "session": {"session_id": "count-check"},
+                "llm": {"request_count": 5},
+                "turns": {"records": []},
+            },
+            [
+                {"name": "llm_request", "session_id": "count-check"},
+                {"name": "llm_request", "session_id": "count-check"},
+                {"name": "llm_request", "session_id": "other-session"},
+            ],
+            RateCard(),
+        )
+
+        check = result["request_count_check"]
+        self.assertEqual(check["status"], "mismatch")
+        self.assertEqual(check["local"], 5)
+        self.assertEqual(check["langfuse"], 2)
+        self.assertEqual(check["difference"], -3)
+
     def test_compare_session_checks_llm_and_calculates_local_stt_tts_costs(self):
         from metrics.costs import RateCard
         from metrics.langfuse_report import compare_session
