@@ -331,15 +331,21 @@ def compare_session(
     }
     local = _local_llm_summary(session_summary)
     local_costs = {"llm": [], "stt": [], "tts": []}
+    local_cost_statuses = {"llm": [], "stt": [], "tts": []}
     calculator = CostCalculator(rate_card)
     for record in (session_summary.get("turns") or {}).get("records") or []:
         breakdown = calculator.calculate_turn(record)
         for name, line in breakdown["lines"].items():
+            local_cost_statuses[name].append(line["status"])
             if line["status"] == "measured":
                 local_costs[name].append(line["cost_usd"])
     own_costs = {
         name: {
-            "status": "measured" if values else "not_applicable",
+            "status": (
+                "missing_rate" if "missing_rate" in local_cost_statuses[name]
+                else "measured" if values
+                else "not_applicable"
+            ),
             "cost_usd": round(sum(values), 6) if values else None,
         }
         for name, values in local_costs.items()

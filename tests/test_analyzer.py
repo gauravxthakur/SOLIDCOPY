@@ -408,6 +408,45 @@ class LangfuseReportTests(unittest.TestCase):
 
         self.assertIsNone(result["llm"]["langfuse"]["cached_tokens"])
 
+    def test_compare_session_marks_used_stt_tts_without_rates_as_missing_rate(self):
+        from metrics.costs import RateCard
+        from metrics.langfuse_report import compare_session
+
+        result = compare_session(
+            {
+                "session": {"session_id": "used-no-rates"},
+                "turns": {
+                    "records": [
+                        {
+                            "stt_model": "deepgram/nova-3:en",
+                            "stt_audio_seconds": 4,
+                            "tts_model": "cartesia/sonic-3",
+                            "tts_characters": 20,
+                            "tts_audio_seconds": 2,
+                        }
+                    ]
+                },
+            },
+            [],
+            RateCard(),
+        )
+
+        self.assertEqual(result["own_rate_card_costs"]["stt"]["status"], "missing_rate")
+        self.assertEqual(result["own_rate_card_costs"]["tts"]["status"], "missing_rate")
+
+    def test_compare_session_marks_unused_stt_tts_not_applicable(self):
+        from metrics.costs import RateCard
+        from metrics.langfuse_report import compare_session
+
+        result = compare_session(
+            {"session": {"session_id": "unused"}, "turns": {"records": [{}]}},
+            [],
+            RateCard(),
+        )
+
+        self.assertEqual(result["own_rate_card_costs"]["stt"]["status"], "not_applicable")
+        self.assertEqual(result["own_rate_card_costs"]["tts"]["status"], "not_applicable")
+
     def test_compare_session_checks_llm_and_calculates_local_stt_tts_costs(self):
         from metrics.costs import RateCard
         from metrics.langfuse_report import compare_session
