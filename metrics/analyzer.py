@@ -115,8 +115,10 @@ class SessionMetricsAccumulator:
     tool_duration: _Statistics = field(default_factory=_Statistics)
     preemptive_started: int = 0
     preemptive_invalidated: int = 0
+    turns: list[dict[str, Any]] = field(default_factory=list)
     _tool_started_at: dict[str, float] = field(default_factory=dict, repr=False)
     _tool_names: dict[str, str] = field(default_factory=dict, repr=False)
+    _pending_turn: dict[str, Any] | None = field(default=None, repr=False)
 
     def collect(self, metric: Any) -> None:
         self.metric_event_count += 1
@@ -138,45 +140,77 @@ class SessionMetricsAccumulator:
             self._collect_vad(metric)
 
     def _collect_llm(self, metric: LLMMetrics) -> None:
+        turn = self._pending_turn_for_metrics()
         self.llm_requests += 1
-        self.llm_prompt_tokens += int(getattr(metric, "prompt_tokens", 0) or 0)
-        self.llm_cached_prompt_tokens += int(getattr(metric, "prompt_cached_tokens", 0) or 0)
-        self.llm_completion_tokens += int(getattr(metric, "completion_tokens", 0) or 0)
+        prompt_tokens = int(getattr(metric, "prompt_tokens", 0) or 0)
+        cached_prompt_tokens = int(getattr(metric, "prompt_cached_tokens", 0) or 0)
+        completion_tokens = int(getattr(metric, "completion_tokens", 0) or 0)
+        self.llm_prompt_tokens += prompt_tokens
+        self.llm_cached_prompt_tokens += cached_prompt_tokens
+        self.llm_completion_tokens += completion_tokens
         self.llm_total_tokens += int(getattr(metric, "total_tokens", 0) or 0)
         self.llm_cancelled += int(bool(getattr(metric, "cancelled", False)))
         self.llm_duration.add(getattr(metric, "duration", None))
         self.llm_ttft.add(getattr(metric, "ttft", None))
         self.llm_tokens_per_second.add(getattr(metric, "tokens_per_second", None))
         self._count_model(self.llm_models, metric)
+        self._add_turn_llm(
+            turn,
+            metric,
+            prompt_tokens,
+            cached_prompt_tokens,
+            completion_tokens,
+        )
 
     def _collect_realtime_model(self, metric: RealtimeModelMetrics) -> None:
+        turn = self._pending_turn_for_metrics()
         self.llm_requests += 1
-        self.llm_prompt_tokens += int(getattr(metric, "input_tokens", 0) or 0)
-        self.llm_completion_tokens += int(getattr(metric, "output_tokens", 0) or 0)
+        prompt_tokens = int(getattr(metric, "input_tokens", 0) or 0)
+        completion_tokens = int(getattr(metric, "output_tokens", 0) or 0)
         self.llm_total_tokens += int(getattr(metric, "total_tokens", 0) or 0)
         details = getattr(metric, "input_token_details", None)
-        self.llm_cached_prompt_tokens += int(getattr(details, "cached_tokens", 0) or 0)
+        cached_prompt_tokens = int(getattr(details, "cached_tokens", 0) or 0)
+        self.llm_prompt_tokens += prompt_tokens
+        self.llm_cached_prompt_tokens += cached_prompt_tokens
+        self.llm_completion_tokens += completion_tokens
         self.llm_cancelled += int(bool(getattr(metric, "cancelled", False)))
         self.llm_duration.add(getattr(metric, "duration", None))
         self.llm_ttft.add(getattr(metric, "ttft", None))
         self.llm_tokens_per_second.add(getattr(metric, "tokens_per_second", None))
         self._count_model(self.llm_models, metric)
+        self._add_turn_llm(
+            turn,
+            metric,
+            prompt_tokens,
+            cached_prompt_tokens,
+            completion_tokens,
+        )
 
     def _collect_tts(self, metric: TTSMetrics) -> None:
+        turn = self._pending_turn_for_metrics()
+        characters = int(getattr(metric, "characters_count", 0) or 0)
+        audio_duration = getattr(metric, "audio_duration", None)
         self.tts_requests += 1
-        self.tts_characters += int(getattr(metric, "characters_count", 0) or 0)
-        self.tts_audio_duration.add(getattr(metric, "audio_duration", None))
+        self.tts_characters += characters
+        self.tts_audio_duration.add(audio_duration)
         self.tts_ttfb.add(getattr(metric, "ttfb", None))
         self.tts_duration.add(getattr(metric, "duration", None))
         self.tts_cancelled += int(bool(getattr(metric, "cancelled", False)))
         self.tts_streamed += int(bool(getattr(metric, "streamed", False)))
         self._count_model(self.tts_models, metric)
+        turn["tts_requests"] += 1
+        self._add_turn_value(turn, "tts_characters", characters)
+        self._add_turn_seconds(turn, "tts_audio_seconds", audio_duration)
 
     def _collect_stt(self, metric: STTMetrics) -> None:
+        turn = self._pending_turn_for_metrics()
+        audio_duration = getattr(metric, "audio_duration", None)
         self.stt_metric_events += 1
-        self.stt_audio_duration.add(getattr(metric, "audio_duration", None))
+        self.stt_audio_duration.add(audio_duration)
         self.stt_duration.add(getattr(metric, "duration", None))
         self._count_model(self.stt_models, metric)
+        turn["stt_requests"] += 1
+        self._add_turn_seconds(turn, "stt_audio_seconds", audio_duration)
 
     def _collect_eou(self, metric: EOUMetrics) -> None:
         self.eou_events += 1
@@ -202,6 +236,126 @@ class SessionMetricsAccumulator:
         self.vad_events += 1
         self.vad_inference_duration.add(getattr(metric, "inference_duration_total", None))
 
+    def _new_pending_turn(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "turn_id": None,
+            "text": None,
+            "llm_model": None,
+            "llm_requests": 0,
+            "prompt_tokens": 0,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 0,
+            "ttft_seconds": None,
+            "tokens_per_second": None,
+            "tts_requests": 0,
+            "tts_characters": 0,
+            "tts_audio_seconds": 0.0,
+            "stt_requests": 0,
+            "stt_audio_seconds": 0.0,
+            "tool_calls_by_id": {},
+            "started_monotonic": time.monotonic(),
+            "interrupted": False,
+            "turn_duration_seconds": None,
+        }
+
+    def _pending_turn_for_metrics(self) -> dict[str, Any]:
+        if self._pending_turn is None:
+            self._pending_turn = self._new_pending_turn()
+        return self._pending_turn
+
+    def _add_turn_llm(
+        self,
+        turn: dict[str, Any],
+        metric: Any,
+        prompt_tokens: int,
+        cached_prompt_tokens: int,
+        completion_tokens: int,
+    ) -> None:
+        turn["llm_requests"] += 1
+        turn["prompt_tokens"] += prompt_tokens
+        turn["cached_prompt_tokens"] += cached_prompt_tokens
+        turn["completion_tokens"] += completion_tokens
+        turn["llm_model"] = self._model_name(metric) or turn["llm_model"]
+        if getattr(metric, "ttft", None) is not None:
+            turn["ttft_seconds"] = float(metric.ttft)
+        if getattr(metric, "tokens_per_second", None) is not None:
+            turn["tokens_per_second"] = float(metric.tokens_per_second)
+
+    @staticmethod
+    def _add_turn_value(turn: dict[str, Any], key: str, value: Any) -> None:
+        if value is not None:
+            turn[key] += value
+
+    @staticmethod
+    def _add_turn_seconds(turn: dict[str, Any], key: str, value: Any) -> None:
+        if value is not None:
+            turn[key] += float(value)
+
+    @staticmethod
+    def _model_name(metric: Any) -> str | None:
+        metadata = getattr(metric, "metadata", None)
+        model = getattr(metric, "label", None)
+        if isinstance(metadata, dict):
+            model = metadata.get("model_name") or model
+        return str(model) if model else None
+
+    @staticmethod
+    def _item_text(item: Any) -> str | None:
+        text = getattr(item, "text", None)
+        if text is None:
+            text = getattr(item, "content", None)
+        if text is None:
+            return None
+        if isinstance(text, str):
+            return text
+        if isinstance(text, (list, tuple)):
+            parts = []
+            for part in text:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict) and part.get("text") is not None:
+                    parts.append(str(part["text"]))
+            return "".join(parts) or None
+        return str(text)
+
+    @staticmethod
+    def _turn_duration(turn: dict[str, Any], report: Any) -> float | None:
+        if isinstance(report, dict) and report.get("e2e_latency") is not None:
+            return float(report["e2e_latency"])
+        return round(time.monotonic() - turn["started_monotonic"], 3)
+
+    @staticmethod
+    def _finalize_turn(turn: dict[str, Any]) -> dict[str, Any]:
+        tool_calls = list(turn.pop("tool_calls_by_id", {}).values())
+        turn.pop("started_monotonic", None)
+        turn["uncached_prompt_tokens"] = max(
+            turn["prompt_tokens"] - turn["cached_prompt_tokens"], 0
+        ) if turn["llm_requests"] else None
+        turn["prompt_tokens"] = turn["prompt_tokens"] if turn["llm_requests"] else None
+        turn["cached_prompt_tokens"] = (
+            turn["cached_prompt_tokens"] if turn["llm_requests"] else None
+        )
+        turn["completion_tokens"] = (
+            turn["completion_tokens"] if turn["llm_requests"] else None
+        )
+        turn["tts_characters"] = turn["tts_characters"] if turn["tts_requests"] else None
+        turn["tts_audio_seconds"] = (
+            round(turn["tts_audio_seconds"], 3) if turn["tts_requests"] else None
+        )
+        turn["stt_audio_seconds"] = (
+            round(turn["stt_audio_seconds"], 3) if turn["stt_requests"] else None
+        )
+        turn["tool_names"] = [call["name"] for call in tool_calls]
+        turn["tool_latency_seconds"] = [
+            call["latency_seconds"] for call in tool_calls
+        ]
+        turn["tool_calls"] = tool_calls
+        turn.pop("llm_requests", None)
+        turn.pop("tts_requests", None)
+        turn.pop("stt_requests", None)
+        return turn
+
     def note_final_transcript(self) -> None:
         """Count one user utterance from a final STT transcript event."""
         self.user_utterance_count += 1
@@ -221,6 +375,13 @@ class SessionMetricsAccumulator:
             self.turn_end_of_turn_delay.add(report.get("end_of_turn_delay"))
             self.turn_llm_ttft.add(report.get("llm_node_ttft"))
             self.turn_tts_ttfb.add(report.get("tts_node_ttfb"))
+        turn = self._pending_turn or self._new_pending_turn()
+        turn["turn_id"] = f"turn-{self.turn_count:04d}"
+        turn["text"] = self._item_text(item)
+        turn["interrupted"] = bool(getattr(item, "interrupted", False))
+        turn["turn_duration_seconds"] = self._turn_duration(turn, report)
+        self.turns.append(self._finalize_turn(turn))
+        self._pending_turn = None
 
     def note_ttfa(self, seconds: float | None) -> None:
         """Time from EOU decision to agent first audio (speaking)."""
@@ -228,9 +389,15 @@ class SessionMetricsAccumulator:
 
     def note_function_tools_executed(self, calls: Any, outputs: Any) -> None:
         """Record a finished tool batch from function_tools_executed."""
+        turn = self._pending_turn_for_metrics()
         pairs = list(zip(list(calls or []), list(outputs or []), strict=False))
         for call, output in pairs:
             name = str(getattr(call, "name", None) or "unknown")
+            call_id = str(getattr(call, "call_id", None) or name)
+            turn["tool_calls_by_id"].setdefault(
+                call_id,
+                {"name": name, "latency_seconds": None},
+            )["name"] = name
             self.tool_calls += 1
             self.tool_by_name[name] += 1
             if output is not None and bool(getattr(output, "is_error", False)):
@@ -239,15 +406,27 @@ class SessionMetricsAccumulator:
                 self.tool_success += 1
 
     def note_tool_started(self, call_id: str, name: str | None = None) -> None:
+        turn = self._pending_turn_for_metrics()
         self._tool_started_at[call_id] = time.monotonic()
         if name:
             self._tool_names[call_id] = name
+        turn["tool_calls_by_id"][call_id] = {
+            "name": name or "unknown",
+            "latency_seconds": None,
+        }
 
     def note_tool_ended(self, call_id: str, status: str | None = None) -> None:
         started = self._tool_started_at.pop(call_id, None)
         self._tool_names.pop(call_id, None)
         if started is not None:
-            self.tool_duration.add(time.monotonic() - started)
+            latency = time.monotonic() - started
+            self.tool_duration.add(latency)
+            if self._pending_turn is not None:
+                tool = self._pending_turn["tool_calls_by_id"].setdefault(
+                    call_id,
+                    {"name": "unknown", "latency_seconds": None},
+                )
+                tool["latency_seconds"] = round(latency, 3)
 
     def note_preemptive_started(self) -> None:
         self.preemptive_started += 1
@@ -336,6 +515,7 @@ class SessionMetricsAccumulator:
                 "llm_ttft_seconds": self.turn_llm_ttft.summary(),
                 "tts_ttfb_seconds": self.turn_tts_ttfb.summary(),
                 "ttfa_seconds": self.ttfa.summary(),
+                "records": list(self.turns),
             },
             "interruptions": {
                 "event_count": self.interruption_events,

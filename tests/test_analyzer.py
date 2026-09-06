@@ -144,6 +144,42 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
         self.assertEqual(summary["tools"]["successful_count"], 1)
         self.assertGreaterEqual(summary["tools"]["duration_seconds"]["count"], 1)
 
+    def test_turn_records_usage_text_and_tool_latency(self):
+        accumulator = SessionMetricsAccumulator(session_id="session-1")
+
+        class Msg:
+            role = "assistant"
+            text = "Here is the answer."
+            interrupted = True
+            metrics = {"e2e_latency": 3.25}
+
+        accumulator.collect(self.llm(100, 20, 60, ttft=1.2, speed=16))
+        accumulator.collect(self.tts(duration=1.0, audio=2.5, characters=24))
+        accumulator.collect(self.stt(4.0))
+        accumulator.note_tool_started("tool-1", "docs_search")
+        accumulator.note_tool_ended("tool-1", "done")
+        accumulator.note_assistant_message(Msg())
+
+        record = accumulator.summary()["turns"]["records"][0]
+        self.assertEqual(record["session_id"], "session-1")
+        self.assertEqual(record["turn_id"], "turn-0001")
+        self.assertEqual(record["text"], "Here is the answer.")
+        self.assertEqual(record["llm_model"], "openai/gpt-4.1-mini")
+        self.assertEqual(record["prompt_tokens"], 100)
+        self.assertEqual(record["cached_prompt_tokens"], 60)
+        self.assertEqual(record["uncached_prompt_tokens"], 40)
+        self.assertEqual(record["completion_tokens"], 20)
+        self.assertEqual(record["ttft_seconds"], 1.2)
+        self.assertEqual(record["tokens_per_second"], 16.0)
+        self.assertEqual(record["tts_characters"], 24)
+        self.assertEqual(record["tts_audio_seconds"], 2.5)
+        self.assertEqual(record["stt_audio_seconds"], 4.0)
+        self.assertEqual(record["tool_names"], ["docs_search"])
+        self.assertEqual(len(record["tool_latency_seconds"]), 1)
+        self.assertGreaterEqual(record["tool_latency_seconds"][0], 0)
+        self.assertEqual(record["turn_duration_seconds"], 3.25)
+        self.assertTrue(record["interrupted"])
+
     def test_interruption_durations_remain_separate(self):
         accumulator = SessionMetricsAccumulator()
         accumulator.collect(metrics.InterruptionMetrics(
