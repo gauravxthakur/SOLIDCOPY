@@ -5,5 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "pipecat-ai[cartesia,deepgram,openai,silero]>=1.10.0",
+    "dotenv>=0.9.9",
+    "pipecat-ai[cartesia,deepgram,google,openai,silero]>=1.10.0",
+    "python-dotenv>=1.2.3",
 ]
