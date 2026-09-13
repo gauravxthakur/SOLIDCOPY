@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "dotenv>=0.9.9",
-    "pipecat-ai[cartesia,deepgram,google,openai,silero]>=1.10.0",
+    "fastapi>=0.141.1",
+    "pipecat-ai[cartesia,deepgram,google,local,openai,runner,silero]>=1.10.0",
     "python-dotenv>=1.2.3",
 ]
