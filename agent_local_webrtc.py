@@ -18,6 +18,8 @@ from pipecat.services.deepgram.stt import DeepgramSTTService
 # from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.services.google.llm import GoogleLLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
+from loguru import logger
+from pipecat.frames.frames import LLMRunFrame
 
 transport_params = {
     "webrtc": lambda: TransportParams(
@@ -71,7 +73,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             enable_usage_metrics=True),
     )
 
-
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info("Client connected - starting conversation")
+        context.add_message({
+            "role": "developer",
+            "content": "Say hello and introduce yourself."
+        })
+        await agent.queue_frames([LLMRunFrame()])
+        
+    
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
         await runner.cancel()
