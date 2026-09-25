@@ -22,6 +22,7 @@ from loguru import logger
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 transport_params = {
     "webrtc": lambda: TransportParams(
@@ -53,7 +54,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(),
-            turn_stop_strategy=TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3()),
+            user_turn_strategies=UserTurnStrategies(stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())]),
         ),
     )
 
