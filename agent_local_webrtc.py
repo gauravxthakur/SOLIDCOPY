@@ -23,6 +23,9 @@ from pipecat.frames.frames import LLMRunFrame
 from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.services.llm_service import FunctionCallParams
+
+
 
 transport_params = {
     "webrtc": lambda: TransportParams(
@@ -40,6 +43,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         api_key=os.getenv("GOOGLE_API_KEY"),
         settings=GoogleLLMService.Settings(
             model="gemini-2.5-flash",
+            system_instruction="You are a helpful voice assistant.",
         ),
     )
     tts = CartesiaTTSService(
@@ -49,7 +53,18 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
     )
 
-    context = LLMContext()
+    
+    # Function that can be called by the LLM during conversation
+    async def get_current_weather(params: FunctionCallParams, location: str, format: str):
+        """Get the current weather.
+
+        Args:
+        location: The city and state, e.g. "San Francisco, CA".
+        format: The temperature unit to use. Must be either "celsius" or "fahrenheit".
+        """
+        await params.result_callback({"conditions": "sunny", "temperature": "75"})
+    
+    context = LLMContext(tools=[get_current_weather])
     aggregators = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
@@ -84,7 +99,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         logger.info("Client connected - starting conversation")
         context.add_message({
             "role": "developer",
-            "content": "Say hello and introduce yourself."
+            "content": "Say hello and introduce yourself as a customer support voice agent.",
         })
         await agent.queue_frames([LLMRunFrame()])
         
