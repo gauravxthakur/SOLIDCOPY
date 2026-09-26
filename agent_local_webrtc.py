@@ -26,6 +26,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
+from pipecat.observers.startup_timing_observer import StartupTimingObserver
 
 
 from metrics.accumulator import MetricsLogger
@@ -82,6 +83,20 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     
     # Observers
     
+    # Measures the time taken by each processor to start up.
+    startup_observer = StartupTimingObserver()
+
+    @startup_observer.event_handler("on_startup_timing_report")
+    async def on_startup_timing_report(observer, report):
+        print(f"Total startup duration: {report.total_duration_secs:.3f}s")
+        for timing in report.processor_timings:
+            print(f"  {timing.processor_name}: {timing.duration_secs:.3f}s")
+
+    @startup_observer.event_handler("on_transport_timing_report")
+    async def on_transport_timing_report(observer, report):
+        print(f"Client connection time: {report.client_connected_secs:.3f}s")
+        
+        
     # Measures the time between when a user stops speaking and when the bot starts speaking.
     latency_observer = UserBotLatencyObserver()
     
@@ -123,7 +138,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         params=PipelineParams(     # controls how the agent runs — audio sample rates, metrics, and more
             enable_metrics=True,
             enable_usage_metrics=True),
-        observers=[turn_observer, latency_observer],
+        observers=[turn_observer, latency_observer, startup_observer],
     )
 
     @transport.event_handler("on_client_connected")
