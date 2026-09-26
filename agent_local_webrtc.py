@@ -26,6 +26,8 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.services.llm_service import FunctionCallParams
 
 
+from metrics.accumulator import MetricsLogger
+
 
 transport_params = {
     "webrtc": lambda: TransportParams(
@@ -73,6 +75,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
     )
 
+    
+    metrics_processor = MetricsLogger()
+    
     pipeline = Pipeline(
         [
             transport.input(),
@@ -82,6 +87,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             tts,
             transport.output(),
             aggregators.assistant(),
+            metrics_processor,
         ]
     )
 

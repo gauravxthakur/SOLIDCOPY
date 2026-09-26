@@ -1,4 +1,4 @@
-from pipecat.frames.frames import MetricsFrame
+from pipecat.frames.frames import Frame, MetricsFrame
 from pipecat.metrics.metrics import (
     LLMUsageMetricsData,
     ProcessingMetricsData,
