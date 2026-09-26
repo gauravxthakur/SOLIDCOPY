@@ -123,6 +123,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         params=PipelineParams(     # controls how the agent runs — audio sample rates, metrics, and more
             enable_metrics=True,
             enable_usage_metrics=True),
+        observers=[turn_observer, latency_observer],
     )
 
     @transport.event_handler("on_client_connected")
