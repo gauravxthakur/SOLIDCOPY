@@ -2,6 +2,7 @@ from loguru import logger
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 from pipecat.observers.startup_timing_observer import StartupTimingObserver
+from pipecat.observers.service_metrics_observer import ServiceMetricsObserver
 
 
 def setup_observers():
@@ -22,6 +23,23 @@ def setup_observers():
     async def on_transport_timing_report(observer, report):
         if report.client_connected_secs is not None:
             logger.info(f"Client connection time: {report.client_connected_secs:.3f}s")
+            
+            
+    # Reports each service metric as a structured record rather than a log line. Emits separate events for latency measurements (TTFB, TTFA, TTFAT) and usage reports (STT audio seconds, TTS characters, LLM token counts).
+    service_observer = ServiceMetricsObserver()
+
+    @service_observer.event_handler("on_service_latency")
+    async def on_service_latency(observer, record):
+        logger.info(f"Service Latency [{record.processor}]: {record.kind} = {record.seconds:.3f}s")
+
+    @service_observer.event_handler("on_service_usage")
+    async def on_service_usage(observer, record):
+        if record.kind == "llm":
+            logger.info(f"LLM Token Usage [{record.processor}]: {record.total_tokens} tokens")
+        elif record.kind == "tts":
+            logger.info(f"TTS Usage [{record.processor}]: {record.characters} characters")
+        elif record.kind == "stt":
+            logger.info(f"STT Usage [{record.processor}]: {record.seconds:.2f}s audio")
         
         
     # Measures the time between when a user stops speaking and when the bot starts speaking.
@@ -44,4 +62,4 @@ def setup_observers():
         status = "interrupted" if was_interrupted else "completed"
         logger.info(f"Turn {turn_count} {status} after {duration:.2f}s")
         
-    return [startup_observer, latency_observer, turn_observer]
+    return [startup_observer, latency_observer, turn_observer, service_observer]
