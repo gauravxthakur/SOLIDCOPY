@@ -24,9 +24,6 @@ from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.services.llm_service import FunctionCallParams
-from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
-from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
-from pipecat.observers.startup_timing_observer import StartupTimingObserver
 
 
 from metrics.accumulator import MetricsLogger
@@ -80,42 +77,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     
     metrics_processor = MetricsLogger()
-    
-    # Observers
-    
-    # Measures the time taken by each processor to start up.
-    startup_observer = StartupTimingObserver()
-
-    @startup_observer.event_handler("on_startup_timing_report")
-    async def on_startup_timing_report(observer, report):
-        print(f"Total startup duration: {report.total_duration_secs:.3f}s")
-        for timing in report.processor_timings:
-            print(f"  {timing.processor_name}: {timing.duration_secs:.3f}s")
-
-    @startup_observer.event_handler("on_transport_timing_report")
-    async def on_transport_timing_report(observer, report):
-        print(f"Client connection time: {report.client_connected_secs:.3f}s")
-        
-        
-    # Measures the time between when a user stops speaking and when the bot starts speaking.
-    latency_observer = UserBotLatencyObserver()
-    
-    @latency_observer.event_handler("on_latency_measured")
-    async def on_latency_measured(observer, latency_seconds):
-        print(f"User-to-bot latency: {latency_seconds:.3f}s")
-        
-    # Tracks conversation turns, emitting events when turns start and end. Handles interruptions and configurable timeouts.
-        
-    turn_observer = TurnTrackingObserver(turn_end_timeout_secs=2.5)
-    
-    @turn_observer.event_handler("on_turn_started")
-    async def on_turn_started(observer, turn_count):
-        print(f"Turn {turn_count} started")
-
-    @turn_observer.event_handler("on_turn_ended")
-    async def on_turn_ended(observer, turn_count, duration, was_interrupted):
-        status = "interrupted" if was_interrupted else "completed"
-        print(f"Turn {turn_count} {status} after {duration:.2f}s")
         
     
     pipeline = Pipeline(
