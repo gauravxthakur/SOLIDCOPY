@@ -1,0 +1,12 @@
+[project]
+name = "pipecat-example"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "dotenv>=0.9.9",
+    "fastapi>=0.141.1",
+    "pipecat-ai[cartesia,deepgram,google,local,openai,runner,silero,webrtc]>=1.10.0",
+    "python-dotenv>=1.2.3",
+]
