@@ -27,6 +27,7 @@ from pipecat.services.llm_service import FunctionCallParams
 
 
 from metrics.accumulator import MetricsLogger
+from metrics.observers import setup_observers
 
 
 transport_params = {
@@ -77,6 +78,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     
     metrics_processor = MetricsLogger()
+    observers = setup_observers()
         
     
     pipeline = Pipeline(
@@ -99,7 +101,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         params=PipelineParams(     # controls how the agent runs — audio sample rates, metrics, and more
             enable_metrics=True,
             enable_usage_metrics=True),
-        observers=[turn_observer, latency_observer, startup_observer],
+        observers=observers,
     )
 
     @transport.event_handler("on_client_connected")
