@@ -1,27 +1,12 @@
-# Operating System Files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-desktop.ini
-
-# Environment Variables & Secrets
-.env
-.env.local
-.env.*.local
-*.pem
-*.key
-*.cert
-
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+
+# C extensions
 *.so
-.Python
+
+# Distribution / packaging
 build/
 develop-eggs/
 dist/
@@ -40,52 +25,90 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# Virtual Environments
+# PyInstaller / Py2exe
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.pydevd
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff
+instance/
+.webassets-cache
+
+# Scrapy stuff
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# Environments
+.env
 .venv
+env/
 venv/
 ENV/
-env/
 env.bak/
 venv.bak/
 
-# Node / Web
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-dist-ssr
-*.local
+# Spyder project settings
+.spyproject
+.spyproject.json
+
+# Rope project settings
+.ropeproject
+
+# MkDocs documentation
+/site
+
+# MyPy / Pyre / Type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.ruff_cache/
 
 # IDEs & Editors
 .vscode/
-!.vscode/extensions.json
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
 .idea/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
 *.swp
 *.swo
-
-# Testing & Coverage
-.coverage
-.coverage.*
-htmlcov/
-.pytest_cache/
-.tox/
-.nox/
-coverage.xml
-*.cover
-
-# Logs & Databases
-*.log
-*.sqlite
-*.sqlite3
-*.db
-
-/metrics/traces
-/metrics/sessions
+*~
+.DS_Store

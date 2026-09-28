@@ -1,0 +1,133 @@
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+from pipecat.audio.vad.silero import SileroVADAnalyzer
+from pipecat.pipeline.pipeline import Pipeline
+from pipecat.workers.runner import WorkerRunner
+from pipecat.pipeline.worker import PipelineParams, PipelineWorker
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+    LLMUserAggregatorParams,
+)
+from pipecat.runner.types import RunnerArguments
+from pipecat.runner.utils import create_transport
+from pipecat.services.cartesia.tts import CartesiaTTSService
+from pipecat.services.deepgram.stt import DeepgramSTTService
+# from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.google.llm import GoogleLLMService
+from pipecat.transports.base_transport import BaseTransport, TransportParams
+from loguru import logger
+from pipecat.frames.frames import LLMRunFrame
+from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
+from pipecat.services.llm_service import FunctionCallParams
+
+
+from metrics.accumulator import MetricsLogger
+from metrics.observers import setup_observers
+
+
+transport_params = {
+    "webrtc": lambda: TransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+    ),
+}
+
+
+async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
+    runner = WorkerRunner(handle_sigint=runner_args.handle_sigint)    # WorkerRunner is the agent's entrypoint
+
+    stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
+    llm = GoogleLLMService(
+        api_key=os.getenv("GOOGLE_API_KEY"),
+        settings=GoogleLLMService.Settings(
+            model="gemini-2.5-flash",
+            system_instruction="You are a helpful voice assistant.",
+        ),
+    )
+    tts = CartesiaTTSService(
+        api_key=os.environ["CARTESIA_API_KEY"],
+        settings=CartesiaTTSService.Settings(
+            voice="86e30c1d-714b-4074-a1f2-1cb6b552fb49",
+        ),
+    )
+
+    
+    # Function that can be called by the LLM during conversation
+    async def get_current_weather(params: FunctionCallParams, location: str, format: str):
+        """Get the current weather.
+
+        Args:
+        location: The city and state, e.g. "San Francisco, CA".
+        format: The temperature unit to use. Must be either "celsius" or "fahrenheit".
+        """
+        await params.result_callback({"conditions": "sunny", "temperature": "75"})
+    
+    context = LLMContext(tools=[get_current_weather])
+    aggregators = LLMContextAggregatorPair(
+        context,
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=SileroVADAnalyzer(),
+            user_turn_strategies=UserTurnStrategies(stop=[TurnAnalyzerUserTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())]),
+        ),
+    )
+
+    
+    metrics_processor = MetricsLogger()
+    observers = setup_observers()
+        
+    
+    pipeline = Pipeline(
+        [
+            transport.input(),
+            stt,
+            aggregators.user(),
+            llm,
+            tts,
+            transport.output(),
+            aggregators.assistant(),
+            metrics_processor,
+        ]
+    )
+
+
+    agent = PipelineWorker(
+        pipeline,
+        name="assistant",
+        params=PipelineParams(     # controls how the agent runs — audio sample rates, metrics, and more
+            enable_metrics=True,
+            enable_usage_metrics=True),
+        observers=observers,
+    )
+
+    @transport.event_handler("on_client_connected")
+    async def on_client_connected(transport, client):
+        logger.info("Client connected - starting conversation")
+        context.add_message({
+            "role": "developer",
+            "content": "Say hello and introduce yourself as a customer support voice agent.",
+        })
+        await agent.queue_frames([LLMRunFrame()])
+        
+    
+    @transport.event_handler("on_client_disconnected")
+    async def on_client_disconnected(transport, client):
+        await runner.cancel()
+
+    await runner.add_workers(agent)
+    await runner.run()
+
+
+async def bot(runner_args: RunnerArguments):
+    transport = await create_transport(runner_args, transport_params)
+    await run_bot(transport, runner_args)
+
+
+if __name__ == "__main__":
+    from pipecat.runner.run import main
+
+    main()
