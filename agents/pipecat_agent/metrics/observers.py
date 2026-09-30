@@ -7,6 +7,7 @@ consume framework-neutral records without importing Pipecat types.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from loguru import logger
@@ -226,11 +227,15 @@ def transcription_to_dict(frame: TranscriptionFrame) -> dict[str, Any]:
     }
 
 
-def setup_observers(accumulator: Any | None = None):
+def setup_observers(
+    accumulator: Any | None = None,
+    on_checkpoint: Any | None = None,
+):
     """Set up observers for startup, service metrics, latency, and turns.
 
     Returns a list of observers for ``PipelineWorker``. When ``accumulator``
     is provided, observer events are automatically dispatched to the recorder.
+    When ``on_checkpoint`` is provided, it is invoked on each completed turn.
     """
     startup_observer = StartupTimingObserver()
 
@@ -315,6 +320,13 @@ def setup_observers(accumulator: Any | None = None):
         payload = turn_ended_to_dict(turn_count, duration, was_interrupted)
         if accumulator is not None:
             accumulator.note_turn_ended(payload)
+            if on_checkpoint is not None:
+                try:
+                    res = on_checkpoint(accumulator.summary_dict())
+                    if inspect.isawaitable(res):
+                        await res
+                except Exception as err:
+                    logger.warning(f"Turn checkpoint hook failed: {err}")
         logger.info(
             f"Turn {payload['turn_count']} {payload['status']} "
             f"after {payload['duration_secs']:.2f}s"

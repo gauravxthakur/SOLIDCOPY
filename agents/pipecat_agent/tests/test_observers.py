@@ -91,6 +91,61 @@ class SetupObserversTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary.tts.characters, 25)
         self.assertEqual(summary.tts.ttfb_seconds.count, 1)
 
+    async def test_checkpoint_callback_invoked_on_turn_ended_sync(self):
+        acc = SessionMetricsAccumulator(session_id="chk-sync")
+        checkpoints = []
+
+        def on_chk(summary_dict):
+            checkpoints.append(summary_dict)
+
+        observers = setup_observers(acc, on_checkpoint=on_chk)
+        turn_obs = observers[2]
+
+        await push_frame(turn_obs, StartFrame(), timestamp=1_000_000_000)
+        await push_frame(turn_obs, BotStartedSpeakingFrame(), timestamp=1_100_000_000)
+        await push_frame(turn_obs, BotStoppedSpeakingFrame(), timestamp=2_000_000_000)
+        await push_frame(turn_obs, UserStartedSpeakingFrame(), timestamp=2_500_000_000)
+
+        self.assertEqual(len(checkpoints), 1)
+        self.assertEqual(checkpoints[0]["session"]["session_id"], "chk-sync")
+        self.assertEqual(checkpoints[0]["turns"]["count"], 1)
+
+    async def test_checkpoint_callback_invoked_on_turn_ended_async(self):
+        acc = SessionMetricsAccumulator(session_id="chk-async")
+        checkpoints = []
+
+        async def on_chk_async(summary_dict):
+            checkpoints.append(summary_dict)
+
+        observers = setup_observers(acc, on_checkpoint=on_chk_async)
+        turn_obs = observers[2]
+
+        await push_frame(turn_obs, StartFrame(), timestamp=1_000_000_000)
+        await push_frame(turn_obs, BotStartedSpeakingFrame(), timestamp=1_100_000_000)
+        await push_frame(turn_obs, BotStoppedSpeakingFrame(), timestamp=2_000_000_000)
+        await push_frame(turn_obs, UserStartedSpeakingFrame(), timestamp=2_500_000_000)
+
+        self.assertEqual(len(checkpoints), 1)
+        self.assertEqual(checkpoints[0]["session"]["session_id"], "chk-async")
+        self.assertEqual(checkpoints[0]["turns"]["count"], 1)
+
+    async def test_checkpoint_callback_failure_does_not_crash_pipeline(self):
+        acc = SessionMetricsAccumulator(session_id="chk-fail")
+
+        def bad_checkpoint(summary_dict):
+            raise OSError("Disk full simulation")
+
+        observers = setup_observers(acc, on_checkpoint=bad_checkpoint)
+        turn_obs = observers[2]
+
+        await push_frame(turn_obs, StartFrame(), timestamp=1_000_000_000)
+        await push_frame(turn_obs, BotStartedSpeakingFrame(), timestamp=1_100_000_000)
+        await push_frame(turn_obs, BotStoppedSpeakingFrame(), timestamp=2_000_000_000)
+        await push_frame(turn_obs, UserStartedSpeakingFrame(), timestamp=2_500_000_000)
+
+        # Turn was still recorded in accumulator despite checkpoint failure
+        self.assertEqual(acc.turn_count, 1)
+
 
 class ServiceMetricsObserverTests(unittest.IsolatedAsyncioTestCase):
     async def test_emits_latency_and_usage_records_and_skips_other_metrics(self):

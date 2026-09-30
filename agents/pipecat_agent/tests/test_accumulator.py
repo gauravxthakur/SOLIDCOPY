@@ -4,8 +4,37 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from metrics.accumulator import RunningStats, SessionMetricsAccumulator
+from metrics.accumulator import (
+    RunningStats,
+    SessionMetricsAccumulator,
+    generate_session_id,
+)
 from metrics.types import SESSION_SUMMARY_TOP_LEVEL_KEYS, session_summary_to_dict
+
+
+class SessionIdGenerationTests(unittest.TestCase):
+    def test_default_session_id_format(self):
+        sess_id = generate_session_id()
+        self.assertTrue(sess_id.startswith("sess_"))
+        parts = sess_id.split("_")
+        self.assertGreaterEqual(len(parts), 3)
+
+    def test_custom_prefix(self):
+        sess_id = generate_session_id(prefix="webrtc")
+        self.assertTrue(sess_id.startswith("webrtc_"))
+
+    def test_base_name_sanitization(self):
+        sess_id = generate_session_id(base_name="Room-123/Special:Name!@#")
+        self.assertTrue(sess_id.startswith("Room-123_Special_Name_"))
+
+    def test_empty_base_name_falls_back(self):
+        sess_id = generate_session_id(prefix="custom", base_name="!@#$%^")
+        self.assertTrue(sess_id.startswith("custom_"))
+
+    def test_accumulator_defaults_session_id(self):
+        acc = SessionMetricsAccumulator()
+        self.assertIsNotNone(acc.session_id)
+        self.assertTrue(acc.session_id.startswith("sess_"))
 
 
 class RunningStatsTests(unittest.TestCase):
