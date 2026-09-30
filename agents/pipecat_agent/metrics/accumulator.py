@@ -42,7 +42,7 @@ from metrics.types import (
     empty_session_summary,
     session_summary_to_dict,
 )
-from metrics.costs import CostCalculator, RateCard
+from metrics.costs import CostCalculator, CreditAccount, RateCard
 
 # ---------------------------------------------------------------------------
 # Session ID Generation
@@ -192,6 +192,7 @@ class SessionMetricsAccumulator:
     tts_model: str | None = None
     rate_card: RateCard | None = None
     cost_calculator: CostCalculator | None = field(default=None, repr=False)
+    credit_account: CreditAccount | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     _started_monotonic: float = field(default_factory=time.monotonic, repr=False)
 
@@ -202,6 +203,8 @@ class SessionMetricsAccumulator:
             self.rate_card = RateCard.from_environment()
         if self.cost_calculator is None:
             self.cost_calculator = CostCalculator(self.rate_card)
+        if self.credit_account is None:
+            self.credit_account = CreditAccount.from_environment()
 
     metric_event_count: int = 0
 
@@ -646,7 +649,28 @@ class SessionMetricsAccumulator:
             lines=cost_lines,
             turns_with_missing_rates=turns_with_missing_rates,
         )
-        base.credit_simulation = CreditSimulation()
+
+        if self.client_connected_secs is not None:
+            credit_source = "transport_client_connected_seconds"
+        else:
+            credit_source = "completed_turn_duration_simulation"
+
+        credit_snap = (
+            self.credit_account.snapshot(source=credit_source)
+            if self.credit_account is not None
+            else {}
+        )
+        base.credit_simulation = CreditSimulation(
+            plan_name=credit_snap.get("plan_name"),
+            customer_rate_inr_per_second=credit_snap.get("customer_rate_inr_per_second"),
+            credit_unit=credit_snap.get("credit_unit", "1 connected second"),
+            connected_seconds_source=credit_snap.get("connected_seconds_source", credit_source),
+            credits_used=credit_snap.get("credits_used"),
+            credits_remaining=credit_snap.get("credits_remaining"),
+            projected_seconds_left=credit_snap.get("projected_seconds_left"),
+            customer_revenue_inr=credit_snap.get("customer_revenue_inr"),
+        )
+
         base.llm = LlmSection(
             request_count=self.llm_requests,
             prompt_tokens=self.llm_prompt_tokens,
@@ -788,6 +812,14 @@ class SessionMetricsAccumulator:
             if self.cost_calculator is not None
             else None
         )
+        credit_simulation = (
+            self.credit_account.record_connected_seconds(
+                turn.get("turn_duration_seconds") or 0.0,
+                source="completed_turn_duration_simulation",
+            )
+            if self.credit_account is not None
+            else None
+        )
 
         return TurnRecord(
             session_id=turn.get("session_id") or self.session_id,
@@ -813,6 +845,7 @@ class SessionMetricsAccumulator:
             tool_latency_seconds=[call.latency_seconds for call in tool_calls],
             tool_calls=tool_calls,
             cost_breakdown=cost_breakdown,
+            credit_simulation=credit_simulation,
         )
 
     def persist(self, directory: Path | str | None = None) -> Path:

@@ -123,6 +123,89 @@ class TTSRate:
 
 
 @dataclass
+class CreditAccount:
+    """Simulation of customer credits and revenue; not an authoritative billing ledger."""
+
+    plan_name: str = "standard"
+    customer_rate_inr_per_second: Decimal = Decimal("0.10")
+    credit_balance: Decimal | None = None
+    credit_seconds_per_second: Decimal = Decimal("1")
+    credits_used: Decimal = Decimal("0")
+    customer_revenue: Decimal = Decimal("0")
+
+    @classmethod
+    def from_environment(cls) -> CreditAccount:
+        """Load credit configuration from environment variables.
+
+        Checks PIPECAT_PLAN_NAME / FONAZO_PLAN_NAME,
+        PIPECAT_CUSTOMER_RATE_INR_PER_SECOND / FONAZO_CUSTOMER_RATE_INR_PER_SECOND,
+        PIPECAT_CREDIT_BALANCE / FONAZO_CREDIT_BALANCE.
+        """
+        plan_name = (
+            os.getenv("PIPECAT_PLAN_NAME")
+            or os.getenv("FONAZO_PLAN_NAME")
+            or "standard"
+        )
+        rate_str = (
+            os.getenv("PIPECAT_CUSTOMER_RATE_INR_PER_SECOND")
+            or os.getenv("FONAZO_CUSTOMER_RATE_INR_PER_SECOND")
+            or "0.10"
+        )
+        balance_str = (
+            os.getenv("PIPECAT_CREDIT_BALANCE")
+            or os.getenv("FONAZO_CREDIT_BALANCE")
+        )
+
+        customer_rate = _decimal_non_negative(rate_str, "customer_rate_inr_per_second")
+        credit_balance = (
+            _decimal_non_negative(balance_str, "credit_balance")
+            if balance_str is not None and balance_str != ""
+            else None
+        )
+
+        return cls(
+            plan_name=plan_name,
+            customer_rate_inr_per_second=customer_rate,
+            credit_balance=credit_balance,
+        )
+
+    def record_connected_seconds(
+        self, seconds: Any, source: str = "completed_turn_duration_simulation"
+    ) -> dict[str, Any]:
+        """Record usage seconds and return a credit snapshot with explicit source label."""
+        connected_seconds = _decimal_non_negative(seconds, "connected_seconds")
+        self.credits_used += connected_seconds * self.credit_seconds_per_second
+        self.customer_revenue += connected_seconds * self.customer_rate_inr_per_second
+        return self.snapshot(source=source)
+
+    def snapshot(
+        self, source: str = "completed_turn_duration_simulation"
+    ) -> dict[str, Any]:
+        """Return a dictionary snapshot of current credit/revenue state."""
+        credits_remaining = (
+            self.credit_balance - self.credits_used
+            if self.credit_balance is not None
+            else None
+        )
+        projected_seconds_left = (
+            max(credits_remaining, Decimal("0")) / self.credit_seconds_per_second
+            if credits_remaining is not None
+            else None
+        )
+
+        return {
+            "plan_name": self.plan_name,
+            "customer_rate_inr_per_second": _number(self.customer_rate_inr_per_second),
+            "credit_unit": "1 connected second",
+            "connected_seconds_source": source,
+            "credits_used": _number(self.credits_used),
+            "credits_remaining": _number(credits_remaining) if credits_remaining is not None else None,
+            "projected_seconds_left": _number(projected_seconds_left) if projected_seconds_left is not None else None,
+            "customer_revenue_inr": _number(self.customer_revenue),
+        }
+
+
+@dataclass
 class RateCard:
     """Configurable rate card keyed by model/provider labels emitted by Pipecat."""
 

@@ -9,7 +9,7 @@ from decimal import Decimal
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from metrics.accumulator import SessionMetricsAccumulator
-from metrics.costs import CostCalculator, LLMRate, RateCard, STTRate, TTSRate
+from metrics.costs import CostCalculator, CreditAccount, LLMRate, RateCard, STTRate, TTSRate
 
 
 class RateCardValidationTests(unittest.TestCase):
@@ -509,6 +509,145 @@ class AccumulatorCostIntegrationTests(unittest.TestCase):
         self.assertIsNone(summary.cost_breakdown.lines["llm"].cost_usd)
 
 
+class CreditSimulationTests(unittest.TestCase):
+    def setUp(self):
+        for key in (
+            "PIPECAT_PLAN_NAME",
+            "FONAZO_PLAN_NAME",
+            "PIPECAT_CUSTOMER_RATE_INR_PER_SECOND",
+            "FONAZO_CUSTOMER_RATE_INR_PER_SECOND",
+            "PIPECAT_CREDIT_BALANCE",
+            "FONAZO_CREDIT_BALANCE",
+        ):
+            os.environ.pop(key, None)
+
+    def tearDown(self):
+        self.setUp()
+
+    def test_credit_account_defaults(self):
+        account = CreditAccount()
+        self.assertEqual(account.plan_name, "standard")
+        self.assertEqual(account.customer_rate_inr_per_second, Decimal("0.10"))
+        self.assertIsNone(account.credit_balance)
+        self.assertEqual(account.credits_used, Decimal("0"))
+        self.assertEqual(account.customer_revenue, Decimal("0"))
+
+        snap = account.snapshot()
+        self.assertEqual(snap["plan_name"], "standard")
+        self.assertEqual(snap["customer_rate_inr_per_second"], 0.1)
+        self.assertEqual(snap["credit_unit"], "1 connected second")
+        self.assertEqual(snap["connected_seconds_source"], "completed_turn_duration_simulation")
+        self.assertEqual(snap["credits_used"], 0.0)
+        self.assertIsNone(snap["credits_remaining"])
+        self.assertIsNone(snap["projected_seconds_left"])
+        self.assertEqual(snap["customer_revenue_inr"], 0.0)
+
+    def test_credit_account_from_environment(self):
+        os.environ["PIPECAT_PLAN_NAME"] = "enterprise"
+        os.environ["PIPECAT_CUSTOMER_RATE_INR_PER_SECOND"] = "0.25"
+        os.environ["PIPECAT_CREDIT_BALANCE"] = "300"
+
+        account = CreditAccount.from_environment()
+        self.assertEqual(account.plan_name, "enterprise")
+        self.assertEqual(account.customer_rate_inr_per_second, Decimal("0.25"))
+        self.assertEqual(account.credit_balance, Decimal("300"))
+
+        snap = account.snapshot()
+        self.assertEqual(snap["credits_remaining"], 300.0)
+        self.assertEqual(snap["projected_seconds_left"], 300.0)
+
+    def test_record_connected_seconds_progression(self):
+        account = CreditAccount(
+            plan_name="pro",
+            customer_rate_inr_per_second=Decimal("0.20"),
+            credit_balance=Decimal("100"),
+        )
+        snap1 = account.record_connected_seconds(30.0, source="completed_turn_duration_simulation")
+        self.assertEqual(snap1["credits_used"], 30.0)
+        self.assertEqual(snap1["credits_remaining"], 70.0)
+        self.assertEqual(snap1["projected_seconds_left"], 70.0)
+        self.assertEqual(snap1["customer_revenue_inr"], 6.0)
+
+        snap2 = account.record_connected_seconds(50.0, source="completed_turn_duration_simulation")
+        self.assertEqual(snap2["credits_used"], 80.0)
+        self.assertEqual(snap2["credits_remaining"], 20.0)
+        self.assertEqual(snap2["projected_seconds_left"], 20.0)
+        self.assertEqual(snap2["customer_revenue_inr"], 16.0)
+
+    def test_explicit_connected_seconds_source_label(self):
+        account = CreditAccount(
+            plan_name="standard",
+            customer_rate_inr_per_second=Decimal("0.10"),
+            credit_balance=Decimal("60"),
+        )
+        snap = account.record_connected_seconds(10.0, source="completed_turn_duration_simulation")
+        self.assertEqual(snap["connected_seconds_source"], "completed_turn_duration_simulation")
+
+        session_snap = account.snapshot(source="transport_client_connected_seconds")
+        self.assertEqual(session_snap["connected_seconds_source"], "transport_client_connected_seconds")
+
+    def test_accumulator_tracks_turn_and_session_credit_simulation(self):
+        account = CreditAccount(
+            plan_name="starter",
+            customer_rate_inr_per_second=Decimal("0.10"),
+            credit_balance=Decimal("120"),
+        )
+        acc = SessionMetricsAccumulator(
+            session_id="credit-test",
+            credit_account=account,
+        )
+
+        acc.note_turn_started(1)
+        acc.note_turn_ended({
+            "turn_count": 1,
+            "duration_secs": 15.0,
+            "was_interrupted": False,
+            "status": "completed",
+        })
+
+        acc.note_turn_started(2)
+        acc.note_turn_ended({
+            "turn_count": 2,
+            "duration_secs": 25.0,
+            "was_interrupted": False,
+            "status": "completed",
+        })
+
+        summary = acc.summary()
+        self.assertEqual(len(summary.turns.records), 2)
+
+        # Turn 1
+        t1_credit = summary.turns.records[0].credit_simulation
+        self.assertIsNotNone(t1_credit)
+        self.assertEqual(t1_credit["credits_used"], 15.0)
+        self.assertEqual(t1_credit["connected_seconds_source"], "completed_turn_duration_simulation")
+
+        # Turn 2
+        t2_credit = summary.turns.records[1].credit_simulation
+        self.assertIsNotNone(t2_credit)
+        self.assertEqual(t2_credit["credits_used"], 40.0)
+        self.assertEqual(t2_credit["credits_remaining"], 80.0)
+        self.assertEqual(t2_credit["customer_revenue_inr"], 4.0)
+
+        # Session summary credit simulation
+        self.assertEqual(summary.credit_simulation.plan_name, "starter")
+        self.assertEqual(summary.credit_simulation.credits_used, 40.0)
+        self.assertEqual(summary.credit_simulation.credits_remaining, 80.0)
+        self.assertEqual(summary.credit_simulation.customer_revenue_inr, 4.0)
+        self.assertEqual(summary.credit_simulation.connected_seconds_source, "completed_turn_duration_simulation")
+
+        # When transport client connected is present
+        acc.note_transport({"client_connected_secs": 42.5})
+        summary_with_transport = acc.summary()
+        self.assertEqual(summary_with_transport.credit_simulation.connected_seconds_source, "transport_client_connected_seconds")
+
+        # JSON dictionary serializability check
+        as_dict = acc.summary_dict()
+        self.assertIn("credit_simulation", as_dict)
+        self.assertEqual(as_dict["credit_simulation"]["credits_used"], 40.0)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
