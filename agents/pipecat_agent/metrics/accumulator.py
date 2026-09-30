@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import math
 import time
 from typing import Any, Mapping
+import uuid
 
 from metrics.types import (
     CostBreakdown,
@@ -35,6 +36,25 @@ from metrics.types import (
     empty_session_summary,
     session_summary_to_dict,
 )
+
+# ---------------------------------------------------------------------------
+# Session ID Generation
+# ---------------------------------------------------------------------------
+
+
+def generate_session_id(prefix: str = "sess", base_name: str | None = None) -> str:
+    """Generate a filesystem-safe, unique session identifier for Pipecat runs.
+
+    If base_name is given (e.g. room name or candidate ID), sanitizes it and appends
+    a unique random suffix. Otherwise, generates a timestamped unique ID.
+    """
+    if base_name:
+        sanitized = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(base_name)).strip("_")
+        if sanitized:
+            return f"{sanitized}_{uuid.uuid4().hex[:8]}"
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return f"{prefix}_{ts}_{uuid.uuid4().hex[:8]}"
+
 
 # ---------------------------------------------------------------------------
 # Statistics
@@ -165,6 +185,10 @@ class SessionMetricsAccumulator:
     tts_model: str | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     _started_monotonic: float = field(default_factory=time.monotonic, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.session_id:
+            self.session_id = generate_session_id()
 
     metric_event_count: int = 0
 

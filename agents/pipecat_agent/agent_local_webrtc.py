@@ -26,7 +26,7 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.services.llm_service import FunctionCallParams
 
 
-from metrics.accumulator import SessionMetricsAccumulator
+from metrics.accumulator import SessionMetricsAccumulator, generate_session_id
 from metrics.observers import setup_observers
 
 
@@ -77,7 +77,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     )
 
     
+    session_id = os.getenv("SESSION_ID") or generate_session_id(prefix="webrtc")
     accumulator = SessionMetricsAccumulator(
+        session_id=session_id,
         llm_model="gemini-2.5-flash",
         stt_model="deepgram",
         tts_model="cartesia",
