@@ -26,7 +26,12 @@ from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.services.llm_service import FunctionCallParams
 
 
-from metrics.accumulator import MetricsLogger
+from metrics.accumulator import (
+    SessionMetricsAccumulator,
+    SummaryLogger,
+    format_summary,
+    generate_session_id,
+)
 from metrics.observers import setup_observers
 
 
@@ -77,8 +82,15 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     )
 
     
-    metrics_processor = MetricsLogger()
-    observers = setup_observers()
+    session_id = os.getenv("SESSION_ID") or generate_session_id(prefix="webrtc")
+    accumulator = SessionMetricsAccumulator(
+        session_id=session_id,
+        llm_model="gemini-2.5-flash",
+        stt_model="deepgram",
+        tts_model="cartesia",
+    )
+    summary_logger = SummaryLogger(accumulator, log_fn=logger.info)
+    observers = setup_observers(accumulator)
         
     
     pipeline = Pipeline(
@@ -90,7 +102,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             tts,
             transport.output(),
             aggregators.assistant(),
-            metrics_processor,
         ]
     )
 
@@ -116,10 +127,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     
     @transport.event_handler("on_client_disconnected")
     async def on_client_disconnected(transport, client):
+        summary_logger.emit(reason="client_disconnected")
         await runner.cancel()
 
-    await runner.add_workers(agent)
-    await runner.run()
+    try:
+        await runner.add_workers(agent)
+        await runner.run()
+    finally:
+        summary_logger.emit(reason="shutdown")
 
 
 async def bot(runner_args: RunnerArguments):
