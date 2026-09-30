@@ -440,10 +440,11 @@ class SessionMetricsAccumulator:
         if not call_id:
             call_id = name
         self._tool_started_at[call_id] = time.monotonic()
-        self._open_tools[call_id] = {"name": name, "latency_seconds": None, "ok": None, "error": None}
+        self._open_tools[call_id] = {"name": name, "tool_call_id": call_id, "latency_seconds": None, "ok": None, "error": None}
         turn = self._pending_turn_for_metrics()
         turn.setdefault("tool_calls_by_id", {})[call_id] = {
             "name": name,
+            "tool_call_id": call_id,
             "latency_seconds": None,
             "ok": None,
             "error": None,
@@ -469,9 +470,10 @@ class SessionMetricsAccumulator:
         if self._pending_turn is not None:
             tool = self._pending_turn.setdefault("tool_calls_by_id", {}).setdefault(
                 call_id,
-                {"name": name, "latency_seconds": None, "ok": None, "error": None},
+                {"name": name, "tool_call_id": call_id, "latency_seconds": None, "ok": None, "error": None},
             )
             tool["name"] = name
+            tool["tool_call_id"] = call_id
             tool["ok"] = ok
             tool["error"] = error
             if latency is not None:
@@ -497,9 +499,10 @@ class SessionMetricsAccumulator:
         if self._pending_turn is not None:
             tool = self._pending_turn.setdefault("tool_calls_by_id", {}).setdefault(
                 call_id or name,
-                {"name": name, "latency_seconds": None, "ok": None, "error": None},
+                {"name": name, "tool_call_id": call_id, "latency_seconds": None, "ok": None, "error": None},
             )
             tool["name"] = name
+            tool["tool_call_id"] = call_id
             tool["ok"] = False
             tool["error"] = "cancelled"
 
@@ -665,7 +668,7 @@ class SessionMetricsAccumulator:
         tool_calls = [
             ToolCallRecord(
                 name=item.get("name"),
-                tool_call_id=None,
+                tool_call_id=item.get("tool_call_id"),
                 latency_seconds=item.get("latency_seconds"),
                 ok=item.get("ok"),
                 error=item.get("error"),
