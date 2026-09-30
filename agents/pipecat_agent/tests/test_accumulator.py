@@ -274,6 +274,110 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
         )
         self.assertEqual(acc.summary().tts.characters, 3)
 
+    def test_service_usage_audio_and_reasoning_tokens(self):
+        acc = SessionMetricsAccumulator(session_id="sess-audio")
+        acc.collect(
+            {
+                "kind": "llm",
+                "processor": "OpenAILLMService",
+                "model": "gpt-4o-audio-preview",
+                "prompt_tokens": 150,
+                "completion_tokens": 80,
+                "total_tokens": 230,
+                "cache_read_input_tokens": 50,
+                "cache_creation_input_tokens": 20,
+                "reasoning_tokens": 15,
+                "input_audio_tokens": 100,
+                "output_audio_tokens": 60,
+                "cache_read_input_audio_tokens": 30,
+            }
+        )
+        summary = acc.summary()
+        self.assertEqual(summary.llm.prompt_tokens, 150)
+        self.assertEqual(summary.llm.cached_prompt_tokens, 50)
+        self.assertEqual(summary.llm.uncached_prompt_tokens, 100)
+        self.assertEqual(summary.llm.completion_tokens, 80)
+        self.assertEqual(summary.llm.total_tokens, 230)
+        self.assertEqual(summary.llm.cache_creation_input_tokens, 20)
+        self.assertEqual(summary.llm.reasoning_tokens, 15)
+        self.assertEqual(summary.llm.input_audio_tokens, 100)
+        self.assertEqual(summary.llm.output_audio_tokens, 60)
+        self.assertEqual(summary.llm.cache_read_input_audio_tokens, 30)
+        self.assertEqual(summary.llm.models.get("gpt-4o-audio-preview"), 1)
+
+    def test_service_latency_ttfb_routing_for_various_processors(self):
+        acc = SessionMetricsAccumulator()
+        # TTS TTFB routing via processor name
+        acc.collect({"kind": "ttfb", "processor": "AzureTTSService", "seconds": 0.18})
+        acc.collect({"kind": "ttfb", "processor": "ElevenLabsTTSService", "seconds": 0.22})
+        # LLM TTFB routing via processor name
+        acc.collect({"kind": "ttfb", "processor": "GroqLLMService", "seconds": 0.09})
+        acc.collect({"kind": "ttfb", "processor": "AnthropicLLMService", "seconds": 0.35})
+
+        summary = acc.summary()
+        self.assertEqual(summary.tts.ttfb_seconds.count, 2)
+        self.assertEqual(summary.tts.ttfb_seconds.minimum, 0.18)
+        self.assertEqual(summary.tts.ttfb_seconds.maximum, 0.22)
+        self.assertEqual(summary.llm.ttfb_seconds.count, 2)
+        self.assertEqual(summary.llm.ttfb_seconds.minimum, 0.09)
+        self.assertEqual(summary.llm.ttfb_seconds.maximum, 0.35)
+
+    def test_stt_audio_stats_and_multiple_chunks(self):
+        acc = SessionMetricsAccumulator(stt_model="deepgram-nova-2")
+        acc.collect({"kind": "stt", "processor": "DeepgramSTTService", "audio_seconds": 1.0})
+        acc.collect({"kind": "stt", "processor": "DeepgramSTTService", "audio_seconds": 2.5})
+        acc.collect({"kind": "stt", "processor": "DeepgramSTTService", "audio_seconds": 0.5})
+
+        summary = acc.summary()
+        self.assertEqual(summary.stt.metric_event_count, 3)
+        self.assertEqual(summary.stt.audio_duration_seconds.count, 3)
+        self.assertEqual(summary.stt.audio_duration_seconds.total, 4.0)
+        self.assertEqual(summary.stt.audio_duration_seconds.minimum, 0.5)
+        self.assertEqual(summary.stt.audio_duration_seconds.maximum, 2.5)
+        self.assertAlmostEqual(summary.stt.audio_duration_seconds.average, 1.333, places=3)
+        self.assertEqual(summary.stt.models.get("deepgram-nova-2"), 3)
+
+    def test_malformed_and_missing_values_handled_gracefully(self):
+        acc = SessionMetricsAccumulator()
+        # Non-numeric or missing values should not crash the accumulator
+        acc.note_service_usage(
+            {
+                "kind": "llm",
+                "processor": "LLM",
+                "prompt_tokens": "not-an-int",
+                "completion_tokens": None,
+                "total_tokens": "invalid",
+            }
+        )
+        acc.note_service_usage(
+            {
+                "kind": "tts",
+                "processor": "TTS",
+                "characters": "abc",
+            }
+        )
+        acc.note_service_usage(
+            {
+                "kind": "stt",
+                "processor": "STT",
+                "audio_seconds": "not-a-float",
+            }
+        )
+        acc.note_service_latency(
+            {
+                "kind": "ttfb",
+                "processor": "LLM",
+                "seconds": "bad-float",
+            }
+        )
+        summary = acc.summary()
+        self.assertEqual(summary.llm.request_count, 1)
+        self.assertEqual(summary.llm.prompt_tokens, 0)
+        self.assertEqual(summary.llm.completion_tokens, 0)
+        self.assertEqual(summary.tts.characters, 0)
+        self.assertEqual(summary.stt.audio_duration_seconds.count, 0)
+        self.assertEqual(summary.llm.ttfb_seconds.count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

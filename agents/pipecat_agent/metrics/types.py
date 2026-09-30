@@ -132,6 +132,9 @@ class LlmSection:
     total_tokens: int = 0
     cache_creation_input_tokens: int = 0
     reasoning_tokens: int = 0
+    input_audio_tokens: int = 0
+    output_audio_tokens: int = 0
+    cache_read_input_audio_tokens: int = 0
     # Approximate: Pipecat LLM ttfb / ttfat, not LiveKit LLMMetrics.ttft
     ttfb_seconds: StatSummary = field(default_factory=empty_stats)
     ttfat_seconds: StatSummary = field(default_factory=empty_stats)
