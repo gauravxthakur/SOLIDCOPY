@@ -74,8 +74,34 @@ class RunningStats:
 
 _LATENCY_KINDS = frozenset({"ttfb", "ttfa", "ttfat"})
 _USAGE_KINDS = frozenset({"llm", "stt", "tts"})
-_LLM_PROCESSOR_TOKENS = ("llm", "openai", "google", "anthropic", "gemini", "bedrock")
-_TTS_PROCESSOR_TOKENS = ("tts", "cartesia", "eleven", "deepgram-tts")
+_LLM_PROCESSOR_TOKENS = (
+    "llm",
+    "openai",
+    "google",
+    "anthropic",
+    "gemini",
+    "bedrock",
+    "groq",
+    "ollama",
+    "mistral",
+    "deepseek",
+    "together",
+    "cerebras",
+    "fireworks",
+)
+_TTS_PROCESSOR_TOKENS = (
+    "tts",
+    "cartesia",
+    "eleven",
+    "deepgram-tts",
+    "azure",
+    "playht",
+    "lmnt",
+    "rime",
+    "piper",
+    "polly",
+    "openai-tts",
+)
 
 
 def _as_int(value: Any) -> int:
@@ -140,6 +166,9 @@ class SessionMetricsAccumulator:
     llm_total_tokens: int = 0
     llm_cache_creation_input_tokens: int = 0
     llm_reasoning_tokens: int = 0
+    llm_input_audio_tokens: int = 0
+    llm_output_audio_tokens: int = 0
+    llm_cache_read_input_audio_tokens: int = 0
     llm_ttfb: RunningStats = field(default_factory=RunningStats)
     llm_ttfat: RunningStats = field(default_factory=RunningStats)
     llm_models: Counter[str] = field(default_factory=Counter)
@@ -276,12 +305,18 @@ class SessionMetricsAccumulator:
             total = _as_int(record.get("total_tokens"))
             cache_create = _as_int(record.get("cache_creation_input_tokens"))
             reasoning = _as_int(record.get("reasoning_tokens"))
+            input_audio = _as_int(record.get("input_audio_tokens"))
+            output_audio = _as_int(record.get("output_audio_tokens"))
+            cache_read_audio = _as_int(record.get("cache_read_input_audio_tokens"))
             self.llm_prompt_tokens += prompt
             self.llm_cached_prompt_tokens += cached
             self.llm_completion_tokens += completion
             self.llm_total_tokens += total or (prompt + completion)
             self.llm_cache_creation_input_tokens += cache_create
             self.llm_reasoning_tokens += reasoning
+            self.llm_input_audio_tokens += input_audio
+            self.llm_output_audio_tokens += output_audio
+            self.llm_cache_read_input_audio_tokens += cache_read_audio
             _count_model(self.llm_models, model or self.llm_model)
             turn["llm_requests"] = int(turn.get("llm_requests") or 0) + 1
             turn["prompt_tokens"] = int(turn.get("prompt_tokens") or 0) + prompt
@@ -530,6 +565,9 @@ class SessionMetricsAccumulator:
             total_tokens=total_tokens,
             cache_creation_input_tokens=self.llm_cache_creation_input_tokens,
             reasoning_tokens=self.llm_reasoning_tokens,
+            input_audio_tokens=self.llm_input_audio_tokens,
+            output_audio_tokens=self.llm_output_audio_tokens,
+            cache_read_input_audio_tokens=self.llm_cache_read_input_audio_tokens,
             ttfb_seconds=self.llm_ttfb.summary(),
             ttfat_seconds=self.llm_ttfat.summary(),
             models=dict(self.llm_models),
