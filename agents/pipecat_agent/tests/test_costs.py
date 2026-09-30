@@ -8,7 +8,8 @@ from decimal import Decimal
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from metrics.costs import LLMRate, RateCard, STTRate, TTSRate
+from metrics.accumulator import SessionMetricsAccumulator
+from metrics.costs import CostCalculator, LLMRate, RateCard, STTRate, TTSRate
 
 
 class RateCardValidationTests(unittest.TestCase):
@@ -252,5 +253,262 @@ class RateCardValidationTests(unittest.TestCase):
             RateCard.from_dict(inf_dict)
 
 
+class CostCalculatorTurnTests(unittest.TestCase):
+    def setUp(self):
+        self.rate_card = RateCard.from_dict({
+            "llm": {
+                "gemini-2.5-flash": {
+                    "cached_input_per_token": "0.000001",
+                    "uncached_input_per_token": "0.000005",
+                    "completion_per_token": "0.000015",
+                },
+            },
+            "stt": {
+                "deepgram": {
+                    "per_audio_second": "0.0001",
+                },
+            },
+            "tts": {
+                "cartesia": {
+                    "per_character": "0.00003",
+                    "billing_basis": "characters",
+                },
+                "elevenlabs": {
+                    "per_audio_second": "0.001",
+                    "billing_basis": "audio_seconds",
+                },
+            },
+        })
+        self.calc = CostCalculator(self.rate_card)
+
+    def test_llm_cached_and_uncached_token_cost(self):
+        # 1000 prompt tokens total, 400 cached => 600 uncached, 200 completion tokens
+        # Cost: (400 * 0.000001) + (600 * 0.000005) + (200 * 0.000015)
+        #       = 0.0004 + 0.003 + 0.003 = 0.0064
+        turn = {
+            "llm_model": "gemini-2.5-flash",
+            "prompt_tokens": 1000,
+            "cached_prompt_tokens": 400,
+            "completion_tokens": 200,
+        }
+        res = self.calc.calculate_turn(turn)
+        self.assertEqual(res["status"], "measured")
+        self.assertEqual(res["lines"]["llm"]["status"], "measured")
+        self.assertEqual(res["lines"]["llm"]["cost_usd"], 0.0064)
+        self.assertEqual(res["lines"]["stt"]["status"], "not_applicable")
+        self.assertEqual(res["lines"]["tts"]["status"], "not_applicable")
+        self.assertEqual(res["total_cost_usd"], 0.0064)
+
+    def test_stt_audio_seconds_cost(self):
+        # 12.5 seconds * 0.0001 = 0.00125
+        turn = {
+            "stt_model": "deepgram",
+            "stt_audio_seconds": 12.5,
+        }
+        res = self.calc.calculate_turn(turn)
+        self.assertEqual(res["status"], "measured")
+        self.assertEqual(res["lines"]["stt"]["status"], "measured")
+        self.assertEqual(res["lines"]["stt"]["cost_usd"], 0.00125)
+        self.assertEqual(res["total_cost_usd"], 0.00125)
+
+    def test_tts_characters_basis_cost(self):
+        # 300 characters * 0.00003 = 0.009
+        turn = {
+            "tts_model": "cartesia",
+            "tts_characters": 300,
+        }
+        res = self.calc.calculate_turn(turn)
+        self.assertEqual(res["status"], "measured")
+        self.assertEqual(res["lines"]["tts"]["status"], "measured")
+        self.assertEqual(res["lines"]["tts"]["billing_basis"], "characters")
+        self.assertEqual(res["lines"]["tts"]["cost_usd"], 0.009)
+        self.assertEqual(res["total_cost_usd"], 0.009)
+
+    def test_tts_audio_seconds_basis_cost(self):
+        # 4.5 seconds * 0.001 = 0.0045
+        turn = {
+            "tts_model": "elevenlabs",
+            "tts_audio_seconds": 4.5,
+        }
+        res = self.calc.calculate_turn(turn)
+        self.assertEqual(res["status"], "measured")
+        self.assertEqual(res["lines"]["tts"]["status"], "measured")
+        self.assertEqual(res["lines"]["tts"]["billing_basis"], "audio_seconds")
+        self.assertEqual(res["lines"]["tts"]["cost_usd"], 0.0045)
+        self.assertEqual(res["total_cost_usd"], 0.0045)
+
+    def test_turn_all_measured(self):
+        turn = {
+            "llm_model": "gemini-2.5-flash",
+            "prompt_tokens": 100,
+            "cached_prompt_tokens": 0,
+            "completion_tokens": 50,
+            "stt_model": "deepgram",
+            "stt_audio_seconds": 2.0,
+            "tts_model": "cartesia",
+            "tts_characters": 100,
+        }
+        # LLM: 100 * 0.000005 + 50 * 0.000015 = 0.0005 + 0.00075 = 0.00125
+        # STT: 2.0 * 0.0001 = 0.0002
+        # TTS: 100 * 0.00003 = 0.003
+        # Total = 0.00445
+        res = self.calc.calculate_turn(turn)
+        self.assertEqual(res["status"], "measured")
+        self.assertEqual(res["lines"]["llm"]["cost_usd"], 0.00125)
+        self.assertEqual(res["lines"]["stt"]["cost_usd"], 0.0002)
+        self.assertEqual(res["lines"]["tts"]["cost_usd"], 0.003)
+        self.assertEqual(res["total_cost_usd"], 0.00445)
+
+    def test_turn_missing_rate(self):
+        turn = {
+            "llm_model": "unconfigured-model",
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "stt_model": "deepgram",
+            "stt_audio_seconds": 1.0,
+        }
+        res = self.calc.calculate_turn(turn)
+        self.assertEqual(res["status"], "missing_rate")
+        self.assertEqual(res["lines"]["llm"]["status"], "missing_rate")
+        self.assertIsNone(res["lines"]["llm"]["cost_usd"])
+        self.assertEqual(res["lines"]["stt"]["status"], "measured")
+        # STT is measured (0.0001), total_cost_usd reflects measured portions
+        self.assertEqual(res["total_cost_usd"], 0.0001)
+
+    def test_turn_not_applicable_when_empty(self):
+        turn = {}
+        res = self.calc.calculate_turn(turn)
+        self.assertEqual(res["status"], "not_applicable")
+        self.assertIsNone(res["total_cost_usd"])
+        for mod in ("llm", "stt", "tts"):
+            self.assertEqual(res["lines"][mod]["status"], "not_applicable")
+            self.assertIsNone(res["lines"][mod]["cost_usd"])
+
+
+class AccumulatorCostIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.rate_card = RateCard.from_dict({
+            "llm": {
+                "gemini-2.5-flash": {
+                    "cached_input_per_token": "0.000001",
+                    "uncached_input_per_token": "0.000005",
+                    "completion_per_token": "0.000015",
+                },
+            },
+            "stt": {
+                "deepgram": {
+                    "per_audio_second": "0.0001",
+                },
+            },
+            "tts": {
+                "cartesia": {
+                    "per_character": "0.00003",
+                    "billing_basis": "characters",
+                },
+            },
+        })
+
+    def test_accumulator_records_turn_costs_and_session_summary(self):
+        acc = SessionMetricsAccumulator(
+            session_id="acc-cost-test",
+            llm_model="gemini-2.5-flash",
+            stt_model="deepgram",
+            tts_model="cartesia",
+            rate_card=self.rate_card,
+        )
+
+        # Turn 1
+        acc.note_turn_started(1)
+        acc.collect({
+            "kind": "llm",
+            "processor": "GoogleLLMService",
+            "model": "gemini-2.5-flash",
+            "prompt_tokens": 200,
+            "completion_tokens": 100,
+            "total_tokens": 300,
+            "cache_read_input_tokens": 50,
+        })
+        acc.collect({
+            "kind": "stt",
+            "processor": "DeepgramSTTService",
+            "model": "deepgram",
+            "audio_seconds": 3.0,
+        })
+        acc.collect({
+            "kind": "tts",
+            "processor": "CartesiaTTSService",
+            "model": "cartesia",
+            "characters": 150,
+        })
+        acc.note_turn_ended({
+            "turn_count": 1,
+            "duration_secs": 4.0,
+            "was_interrupted": False,
+            "status": "completed",
+        })
+
+        summary = acc.summary()
+        self.assertEqual(len(summary.turns.records), 1)
+        t1_cost = summary.turns.records[0].cost_breakdown
+        self.assertIsNotNone(t1_cost)
+        self.assertEqual(t1_cost["status"], "measured")
+
+        # Turn 1:
+        # LLM: 50 * 0.000001 + 150 * 0.000005 + 100 * 0.000015 = 0.00005 + 0.00075 + 0.0015 = 0.0023
+        # STT: 3.0 * 0.0001 = 0.0003
+        # TTS: 150 * 0.00003 = 0.0045
+        # Total = 0.0071
+        self.assertEqual(t1_cost["lines"]["llm"]["cost_usd"], 0.0023)
+        self.assertEqual(t1_cost["lines"]["stt"]["cost_usd"], 0.0003)
+        self.assertEqual(t1_cost["lines"]["tts"]["cost_usd"], 0.0045)
+        self.assertEqual(t1_cost["total_cost_usd"], 0.0071)
+
+        # Session summary cost breakdown
+        self.assertEqual(summary.cost_breakdown.currency, "USD")
+        self.assertEqual(summary.cost_breakdown.total_cost_usd, 0.0071)
+        self.assertEqual(summary.cost_breakdown.lines["llm"].status, "measured")
+        self.assertEqual(summary.cost_breakdown.lines["llm"].cost_usd, 0.0023)
+        self.assertEqual(summary.cost_breakdown.lines["stt"].status, "measured")
+        self.assertEqual(summary.cost_breakdown.lines["stt"].cost_usd, 0.0003)
+        self.assertEqual(summary.cost_breakdown.lines["tts"].status, "measured")
+        self.assertEqual(summary.cost_breakdown.lines["tts"].cost_usd, 0.0045)
+        self.assertEqual(summary.cost_breakdown.turns_with_missing_rates, 0)
+
+        # JSON dictionary serializability check
+        as_dict = acc.summary_dict()
+        self.assertEqual(as_dict["cost_breakdown"]["total_cost_usd"], 0.0071)
+        self.assertEqual(as_dict["cost_breakdown"]["lines"]["llm"]["status"], "measured")
+
+    def test_accumulator_tracks_missing_rate_turns(self):
+        acc = SessionMetricsAccumulator(
+            session_id="acc-missing-rate-test",
+            llm_model="unknown-llm",
+            stt_model="deepgram",
+            tts_model="cartesia",
+            rate_card=self.rate_card,
+        )
+        acc.note_turn_started(1)
+        acc.collect({
+            "kind": "llm",
+            "processor": "CustomLLM",
+            "model": "unknown-llm",
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+        })
+        acc.note_turn_ended({
+            "turn_count": 1,
+            "duration_secs": 2.0,
+            "was_interrupted": False,
+            "status": "completed",
+        })
+
+        summary = acc.summary()
+        self.assertEqual(summary.cost_breakdown.turns_with_missing_rates, 1)
+        self.assertEqual(summary.cost_breakdown.lines["llm"].status, "missing_rate")
+        self.assertIsNone(summary.cost_breakdown.lines["llm"].cost_usd)
+
+
 if __name__ == "__main__":
     unittest.main()
+

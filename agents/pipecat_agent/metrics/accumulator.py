@@ -20,6 +20,8 @@ import uuid
 
 from metrics.types import (
     CostBreakdown,
+    CostLine,
+    CostLineStatus,
     CreditSimulation,
     EndpointingSection,
     EventsSection,
@@ -40,6 +42,7 @@ from metrics.types import (
     empty_session_summary,
     session_summary_to_dict,
 )
+from metrics.costs import CostCalculator, RateCard
 
 # ---------------------------------------------------------------------------
 # Session ID Generation
@@ -187,12 +190,18 @@ class SessionMetricsAccumulator:
     llm_model: str | None = None
     stt_model: str | None = None
     tts_model: str | None = None
+    rate_card: RateCard | None = None
+    cost_calculator: CostCalculator | None = field(default=None, repr=False)
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     _started_monotonic: float = field(default_factory=time.monotonic, repr=False)
 
     def __post_init__(self) -> None:
         if not self.session_id:
             self.session_id = generate_session_id()
+        if self.rate_card is None:
+            self.rate_card = RateCard.from_environment()
+        if self.cost_calculator is None:
+            self.cost_calculator = CostCalculator(self.rate_card)
 
     metric_event_count: int = 0
 
@@ -594,7 +603,49 @@ class SessionMetricsAccumulator:
             duration_seconds=round(time.monotonic() - self._started_monotonic, 3),
         )
         base.events = EventsSection(metric_event_count=self.metric_event_count)
-        base.cost_breakdown = CostBreakdown()
+
+        turn_costs = [rec.cost_breakdown for rec in self.turns if rec.cost_breakdown]
+        line_values: dict[str, list[float]] = {"llm": [], "stt": [], "tts": []}
+        line_statuses: dict[str, list[str]] = {"llm": [], "stt": [], "tts": []}
+
+        for breakdown in turn_costs:
+            lines = breakdown.get("lines", {})
+            for name in ("llm", "stt", "tts"):
+                line = lines.get(name)
+                if line:
+                    st = line.get("status", "not_applicable")
+                    line_statuses[name].append(st)
+                    if st == "measured" and line.get("cost_usd") is not None:
+                        line_values[name].append(line["cost_usd"])
+
+        all_measured = [val for vals in line_values.values() for val in vals]
+        total_cost_usd = round(sum(all_measured), 6) if all_measured else None
+
+        cost_lines: dict[str, CostLine] = {}
+        for name in ("llm", "stt", "tts"):
+            statuses = line_statuses[name]
+            values = line_values[name]
+            if "missing_rate" in statuses:
+                status = CostLineStatus.MISSING_RATE
+                cost_usd = round(sum(values), 6) if values else None
+            elif values:
+                status = CostLineStatus.MEASURED
+                cost_usd = round(sum(values), 6)
+            else:
+                status = CostLineStatus.NOT_APPLICABLE
+                cost_usd = None
+            cost_lines[name] = CostLine(status=status, cost_usd=cost_usd)
+
+        turns_with_missing_rates = sum(
+            1 for breakdown in turn_costs if breakdown.get("status") == "missing_rate"
+        )
+
+        base.cost_breakdown = CostBreakdown(
+            currency="USD",
+            total_cost_usd=total_cost_usd,
+            lines=cost_lines,
+            turns_with_missing_rates=turns_with_missing_rates,
+        )
         base.credit_simulation = CreditSimulation()
         base.llm = LlmSection(
             request_count=self.llm_requests,
@@ -719,6 +770,25 @@ class SessionMetricsAccumulator:
         stt_requests = int(turn.get("stt_requests") or 0)
         stt_audio = float(turn.get("stt_audio_seconds") or 0.0)
 
+        turn_data = {
+            "session_id": turn.get("session_id") or self.session_id,
+            "turn_id": turn.get("turn_id"),
+            "llm_model": turn.get("llm_model") or self.llm_model,
+            "prompt_tokens": prompt if llm_requests else None,
+            "cached_prompt_tokens": cached if llm_requests else None,
+            "completion_tokens": int(turn.get("completion_tokens") or 0) if llm_requests else None,
+            "stt_model": turn.get("stt_model") or self.stt_model,
+            "stt_audio_seconds": round(stt_audio, 3) if stt_requests else None,
+            "tts_model": turn.get("tts_model") or self.tts_model,
+            "tts_characters": int(turn.get("tts_characters") or 0) if tts_requests else None,
+            "tts_audio_seconds": turn.get("tts_audio_seconds"),
+        }
+        cost_breakdown = (
+            self.cost_calculator.calculate_turn(turn_data)
+            if self.cost_calculator is not None
+            else None
+        )
+
         return TurnRecord(
             session_id=turn.get("session_id") or self.session_id,
             turn_id=turn.get("turn_id"),
@@ -742,6 +812,7 @@ class SessionMetricsAccumulator:
             tool_names=[call.name for call in tool_calls if call.name],
             tool_latency_seconds=[call.latency_seconds for call in tool_calls],
             tool_calls=tool_calls,
+            cost_breakdown=cost_breakdown,
         )
 
     def persist(self, directory: Path | str | None = None) -> Path:

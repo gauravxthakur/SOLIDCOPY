@@ -229,3 +229,156 @@ class RateCard:
             return cls.from_json(env_json)
 
         return cls()
+
+
+def _number(value: Decimal) -> float:
+    """Format decimal currency to float with 6 decimal places."""
+    return float(value.quantize(Decimal("0.000001")))
+
+
+def _decimal_non_negative(value: Any, name: str = "value") -> Decimal:
+    """Convert usage quantities to non-negative Decimal, defaulting None to 0."""
+    if isinstance(value, bool):
+        raise ValueError(f"Boolean not allowed for {name}: {value!r}")
+    if value is None:
+        return Decimal("0")
+    try:
+        dec = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid numeric value for {name}: {value!r}") from exc
+    if dec.is_nan() or dec.is_infinite():
+        raise ValueError(f"NaN and Inf not allowed for {name}: {value!r}")
+    if dec < Decimal("0"):
+        return Decimal("0")
+    return dec
+
+
+class CostCalculator:
+    """Convert one finalized turn's usage into an auditable cost breakdown."""
+
+    def __init__(self, rate_card: RateCard | None = None) -> None:
+        self.rate_card = rate_card or RateCard()
+
+    def calculate_turn(self, turn: Mapping[str, Any] | Any) -> dict[str, Any]:
+        """Calculate line-item costs and overall status for a single turn."""
+        if hasattr(turn, "__dict__") and not isinstance(turn, Mapping):
+            turn_dict = turn.__dict__
+        else:
+            turn_dict = dict(turn)
+
+        lines = {
+            "llm": self._llm_line(turn_dict),
+            "stt": self._stt_line(turn_dict),
+            "tts": self._tts_line(turn_dict),
+        }
+        measured = [line for line in lines.values() if line.get("status") == "measured"]
+        missing = [line for line in lines.values() if line.get("status") == "missing_rate"]
+
+        if measured:
+            total = sum(
+                (_decimal_rate(line["cost_usd"], "cost_usd") for line in measured if line.get("cost_usd") is not None),
+                Decimal("0"),
+            )
+            total_cost_usd = _number(total)
+        else:
+            total_cost_usd = None
+
+        if missing:
+            status = "missing_rate"
+        elif measured:
+            status = "measured"
+        else:
+            status = "not_applicable"
+
+        return {
+            "total_cost_usd": total_cost_usd,
+            "status": status,
+            "lines": lines,
+        }
+
+    def _llm_line(self, turn: Mapping[str, Any]) -> dict[str, Any]:
+        model = turn.get("llm_model")
+        prompt_tokens = turn.get("prompt_tokens")
+        cached_prompt_tokens = turn.get("cached_prompt_tokens")
+        completion_tokens = turn.get("completion_tokens")
+
+        # If LLM was not used in this turn
+        if not model and prompt_tokens is None and completion_tokens is None:
+            return {"status": "not_applicable", "cost_usd": None}
+
+        rate = self.rate_card.get_llm_rate(model)
+        if rate is None:
+            return {"status": "missing_rate", "cost_usd": None, "model": model}
+
+        prompt = _decimal_non_negative(prompt_tokens, "prompt_tokens")
+        cached = _decimal_non_negative(cached_prompt_tokens, "cached_prompt_tokens")
+        completion = _decimal_non_negative(completion_tokens, "completion_tokens")
+        uncached = max(prompt - cached, Decimal("0"))
+
+        cost = (
+            cached * rate.cached_input_per_token
+            + uncached * rate.uncached_input_per_token
+            + completion * rate.completion_per_token
+        )
+        return {"status": "measured", "cost_usd": _number(cost), "model": model}
+
+    def _stt_line(self, turn: Mapping[str, Any]) -> dict[str, Any]:
+        model = turn.get("stt_model")
+        audio_seconds = turn.get("stt_audio_seconds")
+
+        if not model and audio_seconds is None:
+            return {"status": "not_applicable", "cost_usd": None}
+
+        rate = self.rate_card.get_stt_rate(model)
+        if rate is None:
+            return {"status": "missing_rate", "cost_usd": None, "model": model}
+
+        if audio_seconds is None:
+            return {"status": "not_applicable", "cost_usd": None}
+
+        seconds = _decimal_non_negative(audio_seconds, "stt_audio_seconds")
+        cost = seconds * rate.per_audio_second
+        return {"status": "measured", "cost_usd": _number(cost), "model": model}
+
+    def _tts_line(self, turn: Mapping[str, Any]) -> dict[str, Any]:
+        model = turn.get("tts_model")
+        characters = turn.get("tts_characters")
+        audio_seconds = turn.get("tts_audio_seconds")
+
+        if not model and characters is None and audio_seconds is None:
+            return {"status": "not_applicable", "cost_usd": None}
+
+        rate = self.rate_card.get_tts_rate(model)
+        if rate is None:
+            return {"status": "missing_rate", "cost_usd": None, "model": model}
+
+        if rate.billing_basis == "characters":
+            if characters is None or rate.per_character is None:
+                return {
+                    "status": "missing_rate" if characters is not None else "not_applicable",
+                    "cost_usd": None,
+                    "model": model,
+                    "billing_basis": rate.billing_basis,
+                }
+            chars = _decimal_non_negative(characters, "tts_characters")
+            cost = chars * rate.per_character
+        elif rate.billing_basis == "audio_seconds":
+            if audio_seconds is None or rate.per_audio_second is None:
+                return {
+                    "status": "missing_rate" if audio_seconds is not None else "not_applicable",
+                    "cost_usd": None,
+                    "model": model,
+                    "billing_basis": rate.billing_basis,
+                }
+            secs = _decimal_non_negative(audio_seconds, "tts_audio_seconds")
+            cost = secs * rate.per_audio_second
+        else:
+            return {"status": "missing_rate", "cost_usd": None, "model": model}
+
+        return {
+            "status": "measured",
+            "cost_usd": _number(cost),
+            "model": model,
+            "billing_basis": rate.billing_basis,
+        }
+
