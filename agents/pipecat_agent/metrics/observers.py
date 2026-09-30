@@ -320,9 +320,10 @@ def setup_observers(
         payload = turn_ended_to_dict(turn_count, duration, was_interrupted)
         if accumulator is not None:
             accumulator.note_turn_ended(payload)
-            if on_checkpoint is not None:
+            checkpoint_fn = on_checkpoint if on_checkpoint is not None else accumulator.checkpoint_after_turn
+            if checkpoint_fn is not None:
                 try:
-                    res = on_checkpoint(accumulator.summary_dict())
+                    res = checkpoint_fn(accumulator.summary_dict())
                     if inspect.isawaitable(res):
                         await res
                 except Exception as err:

@@ -11,12 +11,17 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import math
+import os
+from pathlib import Path
+import re
 import time
 from typing import Any, Callable, Mapping
 import uuid
 
 from metrics.types import (
     CostBreakdown,
+    CostLine,
+    CostLineStatus,
     CreditSimulation,
     EndpointingSection,
     EventsSection,
@@ -37,6 +42,7 @@ from metrics.types import (
     empty_session_summary,
     session_summary_to_dict,
 )
+from metrics.costs import CostCalculator, CreditAccount, RateCard
 
 # ---------------------------------------------------------------------------
 # Session ID Generation
@@ -184,12 +190,21 @@ class SessionMetricsAccumulator:
     llm_model: str | None = None
     stt_model: str | None = None
     tts_model: str | None = None
+    rate_card: RateCard | None = None
+    cost_calculator: CostCalculator | None = field(default=None, repr=False)
+    credit_account: CreditAccount | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     _started_monotonic: float = field(default_factory=time.monotonic, repr=False)
 
     def __post_init__(self) -> None:
         if not self.session_id:
             self.session_id = generate_session_id()
+        if self.rate_card is None:
+            self.rate_card = RateCard.from_environment()
+        if self.cost_calculator is None:
+            self.cost_calculator = CostCalculator(self.rate_card)
+        if self.credit_account is None:
+            self.credit_account = CreditAccount.from_environment()
 
     metric_event_count: int = 0
 
@@ -591,8 +606,71 @@ class SessionMetricsAccumulator:
             duration_seconds=round(time.monotonic() - self._started_monotonic, 3),
         )
         base.events = EventsSection(metric_event_count=self.metric_event_count)
-        base.cost_breakdown = CostBreakdown()
-        base.credit_simulation = CreditSimulation()
+
+        turn_costs = [rec.cost_breakdown for rec in self.turns if rec.cost_breakdown]
+        line_values: dict[str, list[float]] = {"llm": [], "stt": [], "tts": []}
+        line_statuses: dict[str, list[str]] = {"llm": [], "stt": [], "tts": []}
+
+        for breakdown in turn_costs:
+            lines = breakdown.get("lines", {})
+            for name in ("llm", "stt", "tts"):
+                line = lines.get(name)
+                if line:
+                    st = line.get("status", "not_applicable")
+                    line_statuses[name].append(st)
+                    if st == "measured" and line.get("cost_usd") is not None:
+                        line_values[name].append(line["cost_usd"])
+
+        all_measured = [val for vals in line_values.values() for val in vals]
+        total_cost_usd = round(sum(all_measured), 6) if all_measured else None
+
+        cost_lines: dict[str, CostLine] = {}
+        for name in ("llm", "stt", "tts"):
+            statuses = line_statuses[name]
+            values = line_values[name]
+            if "missing_rate" in statuses:
+                status = CostLineStatus.MISSING_RATE
+                cost_usd = round(sum(values), 6) if values else None
+            elif values:
+                status = CostLineStatus.MEASURED
+                cost_usd = round(sum(values), 6)
+            else:
+                status = CostLineStatus.NOT_APPLICABLE
+                cost_usd = None
+            cost_lines[name] = CostLine(status=status, cost_usd=cost_usd)
+
+        turns_with_missing_rates = sum(
+            1 for breakdown in turn_costs if breakdown.get("status") == "missing_rate"
+        )
+
+        base.cost_breakdown = CostBreakdown(
+            currency="USD",
+            total_cost_usd=total_cost_usd,
+            lines=cost_lines,
+            turns_with_missing_rates=turns_with_missing_rates,
+        )
+
+        if self.client_connected_secs is not None:
+            credit_source = "transport_client_connected_seconds"
+        else:
+            credit_source = "completed_turn_duration_simulation"
+
+        credit_snap = (
+            self.credit_account.snapshot(source=credit_source)
+            if self.credit_account is not None
+            else {}
+        )
+        base.credit_simulation = CreditSimulation(
+            plan_name=credit_snap.get("plan_name"),
+            customer_rate_inr_per_second=credit_snap.get("customer_rate_inr_per_second"),
+            credit_unit=credit_snap.get("credit_unit", "1 connected second"),
+            connected_seconds_source=credit_snap.get("connected_seconds_source", credit_source),
+            credits_used=credit_snap.get("credits_used"),
+            credits_remaining=credit_snap.get("credits_remaining"),
+            projected_seconds_left=credit_snap.get("projected_seconds_left"),
+            customer_revenue_inr=credit_snap.get("customer_revenue_inr"),
+        )
+
         base.llm = LlmSection(
             request_count=self.llm_requests,
             prompt_tokens=self.llm_prompt_tokens,
@@ -716,6 +794,33 @@ class SessionMetricsAccumulator:
         stt_requests = int(turn.get("stt_requests") or 0)
         stt_audio = float(turn.get("stt_audio_seconds") or 0.0)
 
+        turn_data = {
+            "session_id": turn.get("session_id") or self.session_id,
+            "turn_id": turn.get("turn_id"),
+            "llm_model": turn.get("llm_model") or self.llm_model,
+            "prompt_tokens": prompt if llm_requests else None,
+            "cached_prompt_tokens": cached if llm_requests else None,
+            "completion_tokens": int(turn.get("completion_tokens") or 0) if llm_requests else None,
+            "stt_model": turn.get("stt_model") or self.stt_model,
+            "stt_audio_seconds": round(stt_audio, 3) if stt_requests else None,
+            "tts_model": turn.get("tts_model") or self.tts_model,
+            "tts_characters": int(turn.get("tts_characters") or 0) if tts_requests else None,
+            "tts_audio_seconds": turn.get("tts_audio_seconds"),
+        }
+        cost_breakdown = (
+            self.cost_calculator.calculate_turn(turn_data)
+            if self.cost_calculator is not None
+            else None
+        )
+        credit_simulation = (
+            self.credit_account.record_connected_seconds(
+                turn.get("turn_duration_seconds") or 0.0,
+                source="completed_turn_duration_simulation",
+            )
+            if self.credit_account is not None
+            else None
+        )
+
         return TurnRecord(
             session_id=turn.get("session_id") or self.session_id,
             turn_id=turn.get("turn_id"),
@@ -739,12 +844,76 @@ class SessionMetricsAccumulator:
             tool_names=[call.name for call in tool_calls if call.name],
             tool_latency_seconds=[call.latency_seconds for call in tool_calls],
             tool_calls=tool_calls,
+            cost_breakdown=cost_breakdown,
+            credit_simulation=credit_simulation,
         )
 
+    def persist(self, directory: Path | str | None = None) -> Path:
+        """Atomically persist the current session metrics summary to disk."""
+        return persist_summary(self.summary_dict(), directory=directory)
+
+    def checkpoint_after_turn(
+        self, summary_dict: Any = None, directory: Path | str | None = None
+    ) -> Path:
+        """Save a session metrics summary checkpoint after a turn ends."""
+        data = summary_dict if isinstance(summary_dict, (dict, SessionSummary)) else self.summary_dict()
+        target_dir = directory if directory is not None else (summary_dict if isinstance(summary_dict, (str, Path)) else None)
+        return persist_summary(data, directory=target_dir)
+
 
 # ---------------------------------------------------------------------------
-# Human-Readable Formatting & Shutdown Guard
+# Atomic JSON Persistence & Formatting
 # ---------------------------------------------------------------------------
+
+_SAFE_SESSION_ID = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def get_default_summary_dir() -> Path:
+    env_dir = os.getenv("PIPECAT_SUMMARY_DIR") or os.getenv("METRICS_SUMMARY_DIR")
+    return Path(env_dir) if env_dir else Path(__file__).resolve().parent / "sessions"
+
+
+DEFAULT_SUMMARY_DIR = get_default_summary_dir()
+
+
+def persist_summary(
+    summary: dict[str, Any] | SessionSummary,
+    directory: Path | str | None = None,
+) -> Path:
+    """Write the structured session summary to disk atomically.
+
+    Creates target directory if needed. Writes JSON payload to a temporary file
+    in target directory first and replaces target path to guarantee atomic write.
+    If writing fails, cleans up temporary file and raises exception (failed writes
+    do not look like success).
+    """
+    if hasattr(summary, "__dataclass_fields__"):
+        summary_dict = session_summary_to_dict(summary)
+    else:
+        summary_dict = dict(summary)
+
+    session_id = (summary_dict.get("session") or {}).get("session_id") or "unknown"
+    safe_id = _SAFE_SESSION_ID.sub("_", str(session_id)).strip("._") or "unknown"
+
+    target_dir = Path(directory) if directory is not None else get_default_summary_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    final_path = target_dir / f"{safe_id}.json"
+    temp_path = target_dir / f"{safe_id}.json.tmp"
+
+    try:
+        content = json.dumps(summary_dict, indent=2)
+        temp_path.write_text(content, encoding="utf-8")
+        temp_path.replace(final_path)
+    except Exception:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+    return final_path
 
 
 def _fmt_duration(seconds: float | None) -> str:
@@ -865,23 +1034,42 @@ class SummaryLogger:
         self,
         accumulator: SessionMetricsAccumulator,
         log_fn: Callable[[str], None] | None = None,
+        persist_dir: Path | str | None = None,
     ) -> None:
         self.accumulator = accumulator
         self.log_fn = log_fn
+        self.persist_dir = persist_dir
         self._emitted = False
 
-    def emit(self, reason: str = "shutdown") -> bool:
+    def emit(
+        self, reason: str = "shutdown", directory: Path | str | None = None
+    ) -> bool:
         """Emit formatted human-readable summary and JSON summary once."""
         if self._emitted:
             return False
         self._emitted = True
         summary_dict = self.accumulator.summary_dict()
         formatted = format_summary(summary_dict)
+
+        target_dir = directory if directory is not None else self.persist_dir
+        saved_path: Path | None = None
+        persist_err: Exception | None = None
+        try:
+            saved_path = persist_summary(summary_dict, directory=target_dir)
+        except Exception as err:
+            persist_err = err
+
         if self.log_fn is not None:
             self.log_fn(f"\n{formatted}")
             self.log_fn(f"Session metrics JSON: {json.dumps(summary_dict)}")
+            if saved_path is not None:
+                self.log_fn(f"Session metrics saved: {saved_path}")
+            elif persist_err is not None:
+                self.log_fn(f"Failed to persist session metrics summary: {persist_err}")
+
         return True
 
     @property
     def emitted(self) -> bool:
         return self._emitted
+

@@ -112,7 +112,7 @@ Target: signals wired through `livekit_agent/simple_agent_new.py` and its metric
 | rate card + LLM/STT/TTS costs | available | port `costs.py`; keys must match Pipecat model labels |
 | missing_rate / measured statuses | available | same semantics |
 | credit simulation | approximate | same simulation idea; connected-time source must be Pipecat transport/session, not assumed turn duration |
-| atomic JSON summary + checkpoint | available | port persistence; checkpoint on `on_turn_ended` |
+| atomic JSON summary + checkpoint | available | port persistence (`agents/pipecat_agent/metrics/sessions`); checkpoint on `on_turn_ended` |
 | format_summary + shutdown once-guard | available | same pattern |
 
 ## Langfuse / tracing / offline report

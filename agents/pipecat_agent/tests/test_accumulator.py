@@ -10,6 +10,8 @@ from metrics.accumulator import (
     SummaryLogger,
     format_summary,
     generate_session_id,
+    get_default_summary_dir,
+    persist_summary,
 )
 from metrics.types import SESSION_SUMMARY_TOP_LEVEL_KEYS, session_summary_to_dict
 
@@ -693,10 +695,10 @@ class SummaryLoggerTests(unittest.TestCase):
         calls = []
         logger = self._make_logger(log_fn=lambda msg: calls.append(msg))
         logger.emit(reason="first")
+        count_after_first = len(calls)
         logger.emit(reason="second")
-        # log_fn is called twice per emit (formatted + JSON), so after 1 emit → 2 calls;
-        # after 2 emit attempts → still 2 calls (once-only guard)
-        self.assertEqual(len(calls), 2)
+        # log_fn is not called on second emit attempt (once-only guard)
+        self.assertEqual(len(calls), count_after_first)
 
     def test_emit_with_no_log_fn_does_not_raise(self):
         logger = self._make_logger(log_fn=None)
@@ -732,5 +734,131 @@ class SummaryLoggerTests(unittest.TestCase):
         self.assertFalse(logger.emit())
 
 
+class PersistenceTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.test_dir = Path(self.temp_dir.name)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_persist_summary_creates_json_file(self):
+        import json as _json
+        acc = SessionMetricsAccumulator(session_id="test-persist-1")
+        acc.collect({
+            "kind": "llm",
+            "processor": "OpenAILLMService",
+            "model": "gpt-4o",
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "cache_read_input_tokens": 0,
+        })
+        path = persist_summary(acc.summary(), directory=self.test_dir)
+        self.assertTrue(path.exists())
+        self.assertEqual(path.name, "test-persist-1.json")
+
+        content = _json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(content["session"]["session_id"], "test-persist-1")
+        self.assertEqual(content["llm"]["prompt_tokens"], 10)
+
+    def test_atomic_temp_and_replace(self):
+        acc = SessionMetricsAccumulator(session_id="atomic-test")
+        path = persist_summary(acc.summary_dict(), directory=self.test_dir)
+        # Check target file exists and temp file does not remain
+        temp_file = self.test_dir / "atomic-test.json.tmp"
+        self.assertTrue(path.exists())
+        self.assertFalse(temp_file.exists())
+
+    def test_safe_session_id_filenames(self):
+        unsafe_ids = [
+            ("Room-123/Special:Name!@#", "Room-123_Special_Name.json"),
+            ("path\\with\\backslashes", "path_with_backslashes.json"),
+            ("   ...   ", "unknown.json"),
+            ("../../../etc/passwd", "etc_passwd.json"),
+        ]
+        for raw_id, expected_filename in unsafe_ids:
+            acc = SessionMetricsAccumulator(session_id=raw_id)
+            path = persist_summary(acc.summary(), directory=self.test_dir)
+            self.assertEqual(path.name, expected_filename, msg=f"Failed for raw_id: {raw_id}")
+
+    def test_configurable_output_dir_via_argument(self):
+        acc = SessionMetricsAccumulator(session_id="custom-dir-test")
+        custom_sub_dir = self.test_dir / "nested" / "output"
+        path = persist_summary(acc.summary(), directory=custom_sub_dir)
+        self.assertTrue(path.exists())
+        self.assertEqual(path.parent, custom_sub_dir)
+
+    def test_configurable_output_dir_via_env_var(self):
+        import os
+        custom_env_dir = self.test_dir / "env_output"
+        old_env = os.environ.get("PIPECAT_SUMMARY_DIR")
+        try:
+            os.environ["PIPECAT_SUMMARY_DIR"] = str(custom_env_dir)
+            acc = SessionMetricsAccumulator(session_id="env-var-test")
+            path = acc.persist()
+            self.assertTrue(path.exists())
+            self.assertEqual(path.parent, custom_env_dir)
+        finally:
+            if old_env is not None:
+                os.environ["PIPECAT_SUMMARY_DIR"] = old_env
+            else:
+                os.environ.pop("PIPECAT_SUMMARY_DIR", None)
+
+    def test_failed_write_raises_and_cleans_temp_file(self):
+        # Point to a file as directory to force write failure
+        blocker = self.test_dir / "blocker_file"
+        blocker.write_text("i am a file", encoding="utf-8")
+
+        acc = SessionMetricsAccumulator(session_id="failed-write")
+        with self.assertRaises((OSError, FileExistsError, NotADirectoryError)):
+            persist_summary(acc.summary(), directory=blocker)
+
+    def test_accumulator_checkpoint_after_turn(self):
+        acc = SessionMetricsAccumulator(session_id="turn-checkpoint")
+        acc.note_turn_started(1)
+        acc.note_turn_ended({
+            "turn_count": 1,
+            "duration_secs": 1.2,
+            "was_interrupted": False,
+            "status": "completed",
+        })
+        path = acc.checkpoint_after_turn(directory=self.test_dir)
+        self.assertTrue(path.exists())
+        import json as _json
+        content = _json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(content["turns"]["count"], 1)
+
+    def test_subsequent_checkpoints_overwrite_same_file(self):
+        acc = SessionMetricsAccumulator(session_id="overwrite-test")
+        path1 = acc.checkpoint_after_turn(directory=self.test_dir)
+        self.assertTrue(path1.exists())
+
+        acc.note_turn_started(1)
+        acc.note_turn_ended({
+            "turn_count": 1,
+            "duration_secs": 2.5,
+            "was_interrupted": False,
+            "status": "completed",
+        })
+        path2 = acc.checkpoint_after_turn(directory=self.test_dir)
+        self.assertEqual(path1, path2)
+
+        import json as _json
+        content = _json.loads(path2.read_text(encoding="utf-8"))
+        self.assertEqual(content["turns"]["count"], 1)
+
+    def test_summary_logger_logs_saved_path(self):
+        acc = SessionMetricsAccumulator(session_id="logger-saved-test")
+        messages = []
+        logger = SummaryLogger(acc, log_fn=lambda msg: messages.append(msg), persist_dir=self.test_dir)
+        logger.emit(reason="shutdown")
+        saved_msg = next((m for m in messages if "Session metrics saved:" in m), None)
+        self.assertIsNotNone(saved_msg, "Session metrics saved message not found")
+        self.assertIn("logger-saved-test.json", saved_msg)
+
+
 if __name__ == "__main__":
     unittest.main()
+
