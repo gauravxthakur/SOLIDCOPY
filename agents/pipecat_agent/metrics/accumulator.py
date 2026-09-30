@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import math
+import os
+from pathlib import Path
+import re
 import time
 from typing import Any, Callable, Mapping
 import uuid
@@ -741,10 +744,72 @@ class SessionMetricsAccumulator:
             tool_calls=tool_calls,
         )
 
+    def persist(self, directory: Path | str | None = None) -> Path:
+        """Atomically persist the current session metrics summary to disk."""
+        return persist_summary(self.summary_dict(), directory=directory)
+
+    def checkpoint_after_turn(
+        self, summary_dict: Any = None, directory: Path | str | None = None
+    ) -> Path:
+        """Save a session metrics summary checkpoint after a turn ends."""
+        data = summary_dict if isinstance(summary_dict, (dict, SessionSummary)) else self.summary_dict()
+        target_dir = directory if directory is not None else (summary_dict if isinstance(summary_dict, (str, Path)) else None)
+        return persist_summary(data, directory=target_dir)
+
 
 # ---------------------------------------------------------------------------
-# Human-Readable Formatting & Shutdown Guard
+# Atomic JSON Persistence & Formatting
 # ---------------------------------------------------------------------------
+
+_SAFE_SESSION_ID = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def get_default_summary_dir() -> Path:
+    env_dir = os.getenv("PIPECAT_SUMMARY_DIR") or os.getenv("METRICS_SUMMARY_DIR")
+    return Path(env_dir) if env_dir else Path(__file__).resolve().parent / "sessions"
+
+
+DEFAULT_SUMMARY_DIR = get_default_summary_dir()
+
+
+def persist_summary(
+    summary: dict[str, Any] | SessionSummary,
+    directory: Path | str | None = None,
+) -> Path:
+    """Write the structured session summary to disk atomically.
+
+    Creates target directory if needed. Writes JSON payload to a temporary file
+    in target directory first and replaces target path to guarantee atomic write.
+    If writing fails, cleans up temporary file and raises exception (failed writes
+    do not look like success).
+    """
+    if hasattr(summary, "__dataclass_fields__"):
+        summary_dict = session_summary_to_dict(summary)
+    else:
+        summary_dict = dict(summary)
+
+    session_id = (summary_dict.get("session") or {}).get("session_id") or "unknown"
+    safe_id = _SAFE_SESSION_ID.sub("_", str(session_id)).strip("._") or "unknown"
+
+    target_dir = Path(directory) if directory is not None else get_default_summary_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    final_path = target_dir / f"{safe_id}.json"
+    temp_path = target_dir / f"{safe_id}.json.tmp"
+
+    try:
+        content = json.dumps(summary_dict, indent=2)
+        temp_path.write_text(content, encoding="utf-8")
+        temp_path.replace(final_path)
+    except Exception:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+    return final_path
 
 
 def _fmt_duration(seconds: float | None) -> str:
@@ -865,23 +930,42 @@ class SummaryLogger:
         self,
         accumulator: SessionMetricsAccumulator,
         log_fn: Callable[[str], None] | None = None,
+        persist_dir: Path | str | None = None,
     ) -> None:
         self.accumulator = accumulator
         self.log_fn = log_fn
+        self.persist_dir = persist_dir
         self._emitted = False
 
-    def emit(self, reason: str = "shutdown") -> bool:
+    def emit(
+        self, reason: str = "shutdown", directory: Path | str | None = None
+    ) -> bool:
         """Emit formatted human-readable summary and JSON summary once."""
         if self._emitted:
             return False
         self._emitted = True
         summary_dict = self.accumulator.summary_dict()
         formatted = format_summary(summary_dict)
+
+        target_dir = directory if directory is not None else self.persist_dir
+        saved_path: Path | None = None
+        persist_err: Exception | None = None
+        try:
+            saved_path = persist_summary(summary_dict, directory=target_dir)
+        except Exception as err:
+            persist_err = err
+
         if self.log_fn is not None:
             self.log_fn(f"\n{formatted}")
             self.log_fn(f"Session metrics JSON: {json.dumps(summary_dict)}")
+            if saved_path is not None:
+                self.log_fn(f"Session metrics saved: {saved_path}")
+            elif persist_err is not None:
+                self.log_fn(f"Failed to persist session metrics summary: {persist_err}")
+
         return True
 
     @property
     def emitted(self) -> bool:
         return self._emitted
+
