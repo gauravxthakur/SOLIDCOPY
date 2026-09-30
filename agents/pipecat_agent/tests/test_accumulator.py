@@ -378,6 +378,74 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
         self.assertEqual(summary.stt.audio_duration_seconds.count, 0)
         self.assertEqual(summary.llm.ttfb_seconds.count, 0)
 
+    def test_turn_interruption_and_interruption_rate(self):
+        acc = SessionMetricsAccumulator(session_id="sess-interrupt")
+        acc.note_turn_started(1)
+        acc.note_turn_ended({"turn_count": 1, "duration_secs": 3.0, "was_interrupted": False})
+        acc.note_turn_started(2)
+        acc.note_turn_ended({"turn_count": 2, "duration_secs": 1.2, "was_interrupted": True})
+        acc.note_turn_started(3)
+        acc.note_turn_ended({"turn_count": 3, "duration_secs": 4.5, "was_interrupted": False})
+        acc.note_turn_started(4)
+        acc.note_turn_ended({"turn_count": 4, "duration_secs": 0.8, "was_interrupted": True})
+
+        summary = acc.summary()
+        self.assertEqual(summary.turns.count, 4)
+        self.assertEqual(summary.turns.completed_count, 2)
+        self.assertEqual(summary.turns.interrupted_count, 2)
+        self.assertEqual(summary.turns.interruption_rate_percentage, 50.0)
+        self.assertEqual(summary.interruptions.interrupted_turn_count, 2)
+        self.assertEqual(summary.runtime.interrupted_cycle_count, 2)
+
+    def test_vad_eou_preemptive_gaps_honestly_documented(self):
+        acc = SessionMetricsAccumulator()
+        summary = acc.summary()
+        self.assertEqual(summary.runtime.vad_event_count.status, "unavailable")
+        self.assertIn("Silero VAD", summary.runtime.vad_event_count.reason)
+        self.assertEqual(summary.runtime.preemptive_generation.status, "n_a")
+        self.assertEqual(summary.endpointing.livekit_eou_fields.status, "unavailable")
+        self.assertEqual(summary.interruptions.provider_interruption_metrics.status, "unavailable")
+        self.assertEqual(summary.interruptions.backchannel_count.status, "unavailable")
+
+    def test_turn_level_tool_calls_attribution(self):
+        acc = SessionMetricsAccumulator(session_id="sess-tools")
+        acc.note_turn_started(1)
+        acc.note_tool_started({"function_name": "fetch_user", "tool_call_id": "call_1"})
+        acc.note_tool_result({"function_name": "fetch_user", "tool_call_id": "call_1", "ok": True})
+        acc.note_tool_started({"function_name": "query_db", "tool_call_id": "call_2"})
+        acc.note_tool_result(
+            {"function_name": "query_db", "tool_call_id": "call_2", "ok": False, "error": "timeout"}
+        )
+        acc.note_turn_ended({"turn_count": 1, "duration_secs": 2.5, "was_interrupted": False})
+
+        acc.note_turn_started(2)
+        acc.note_tool_started({"function_name": "send_email", "tool_call_id": "call_3"})
+        acc.note_tool_cancelled({"function_name": "send_email", "tool_call_id": "call_3"})
+        acc.note_turn_ended({"turn_count": 2, "duration_secs": 1.0, "was_interrupted": True})
+
+        summary = acc.summary()
+        self.assertEqual(summary.tools.count, 3)
+        self.assertEqual(summary.tools.successful_count, 1)
+        self.assertEqual(summary.tools.failed_count, 2)
+        self.assertEqual(summary.tools.cancelled_count, 1)
+
+        turn_1 = summary.turns.records[0]
+        self.assertEqual(turn_1.tool_names, ["fetch_user", "query_db"])
+        self.assertEqual(len(turn_1.tool_calls), 2)
+        self.assertEqual(turn_1.tool_calls[0].tool_call_id, "call_1")
+        self.assertTrue(turn_1.tool_calls[0].ok)
+        self.assertIsNone(turn_1.tool_calls[0].error)
+        self.assertEqual(turn_1.tool_calls[1].tool_call_id, "call_2")
+        self.assertFalse(turn_1.tool_calls[1].ok)
+        self.assertEqual(turn_1.tool_calls[1].error, "timeout")
+
+        turn_2 = summary.turns.records[1]
+        self.assertEqual(turn_2.tool_names, ["send_email"])
+        self.assertEqual(len(turn_2.tool_calls), 1)
+        self.assertEqual(turn_2.tool_calls[0].tool_call_id, "call_3")
+        self.assertFalse(turn_2.tool_calls[0].ok)
+        self.assertEqual(turn_2.tool_calls[0].error, "cancelled")
+
 
 if __name__ == "__main__":
     unittest.main()
