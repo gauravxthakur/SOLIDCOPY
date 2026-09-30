@@ -9,6 +9,25 @@ from metrics.types import SESSION_SUMMARY_TOP_LEVEL_KEYS, session_summary_to_dic
 
 
 class RunningStatsTests(unittest.TestCase):
+    def test_empty_running_stats(self):
+        stats = RunningStats()
+        summary = stats.summary()
+        self.assertEqual(summary.count, 0)
+        self.assertIsNone(summary.average)
+        self.assertIsNone(summary.minimum)
+        self.assertIsNone(summary.maximum)
+        self.assertEqual(summary.total, 0.0)
+
+    def test_single_value(self):
+        stats = RunningStats()
+        stats.add(3.14159)
+        summary = stats.summary(digits=2)
+        self.assertEqual(summary.count, 1)
+        self.assertEqual(summary.average, 3.14)
+        self.assertEqual(summary.minimum, 3.14)
+        self.assertEqual(summary.maximum, 3.14)
+        self.assertEqual(summary.total, 3.14)
+
     def test_ignores_none_and_malformed_values(self):
         stats = RunningStats()
         stats.add(None)
@@ -21,6 +40,43 @@ class RunningStatsTests(unittest.TestCase):
         self.assertEqual(summary.average, 1.0)
         self.assertEqual(summary.minimum, 0.5)
         self.assertEqual(summary.maximum, 1.5)
+
+    def test_rejects_booleans_nan_inf(self):
+        stats = RunningStats()
+        stats.add(True)
+        stats.add(False)
+        stats.add(float("nan"))
+        stats.add(float("inf"))
+        stats.add(float("-inf"))
+        stats.add("nan")
+        stats.add("inf")
+        stats.add(10.0)
+        summary = stats.summary()
+        self.assertEqual(summary.count, 1)
+        self.assertEqual(summary.total, 10.0)
+        self.assertEqual(summary.average, 10.0)
+
+    def test_negative_values_and_zeros(self):
+        stats = RunningStats()
+        stats.add(-5.0)
+        stats.add(0.0)
+        stats.add(5.0)
+        summary = stats.summary()
+        self.assertEqual(summary.count, 3)
+        self.assertEqual(summary.total, 0.0)
+        self.assertEqual(summary.average, 0.0)
+        self.assertEqual(summary.minimum, -5.0)
+        self.assertEqual(summary.maximum, 5.0)
+
+    def test_no_p50_or_p95_in_stat_summary(self):
+        stats = RunningStats()
+        stats.add(1.0)
+        summary = stats.summary()
+        # Verify StatSummary fields only match count/average/minimum/maximum/total
+        fields = set(summary.__dataclass_fields__.keys())
+        self.assertEqual(fields, {"count", "average", "minimum", "maximum", "total"})
+        self.assertNotIn("p50", fields)
+        self.assertNotIn("p95", fields)
 
 
 class SessionMetricsAccumulatorTests(unittest.TestCase):
@@ -445,6 +501,29 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
         self.assertEqual(turn_2.tool_calls[0].tool_call_id, "call_3")
         self.assertFalse(turn_2.tool_calls[0].ok)
         self.assertEqual(turn_2.tool_calls[0].error, "cancelled")
+
+    def test_empty_session_summary_and_serialization(self):
+        acc = SessionMetricsAccumulator(session_id="empty-sess")
+        summary = acc.summary()
+        self.assertEqual(summary.session.session_id, "empty-sess")
+        self.assertEqual(summary.events.metric_event_count, 0)
+        self.assertEqual(summary.llm.request_count, 0)
+        self.assertEqual(summary.llm.total_tokens, 0)
+        self.assertEqual(summary.llm.ttfb_seconds.count, 0)
+        self.assertIsNone(summary.llm.ttfb_seconds.average)
+        self.assertEqual(summary.tts.characters, 0)
+        self.assertEqual(summary.tts.ttfb_seconds.count, 0)
+        self.assertEqual(summary.stt.metric_event_count, 0)
+        self.assertEqual(summary.stt.audio_duration_seconds.count, 0)
+        self.assertEqual(summary.turns.count, 0)
+        self.assertEqual(len(summary.turns.records), 0)
+        self.assertEqual(summary.tools.count, 0)
+
+        # JSON dictionary serializability check
+        as_dict = acc.summary_dict()
+        self.assertEqual(tuple(as_dict.keys()), SESSION_SUMMARY_TOP_LEVEL_KEYS)
+        self.assertEqual(as_dict["llm"]["ttfb_seconds"]["count"], 0)
+        self.assertIsNone(as_dict["llm"]["ttfb_seconds"]["average"])
 
 
 if __name__ == "__main__":

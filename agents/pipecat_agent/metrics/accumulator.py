@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import math
 import time
 from typing import Any, Mapping
 
@@ -50,11 +51,13 @@ class RunningStats:
     maximum: float | None = None
 
     def add(self, value: Any) -> None:
-        if value is None:
+        if value is None or isinstance(value, bool):
             return
         try:
             number = float(value)
         except (TypeError, ValueError):
+            return
+        if math.isnan(number) or math.isinf(number):
             return
         self.count += 1
         self.total += number
@@ -105,19 +108,25 @@ _TTS_PROCESSOR_TOKENS = (
 
 
 def _as_int(value: Any) -> int:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return 0
     try:
-        return int(value)
+        number = float(value)
+        if math.isnan(number) or math.isinf(number):
+            return 0
+        return int(number)
     except (TypeError, ValueError):
         return 0
 
 
 def _as_optional_float(value: Any) -> float | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     try:
-        return float(value)
+        number = float(value)
+        if math.isnan(number) or math.isinf(number):
+            return None
+        return number
     except (TypeError, ValueError):
         return None
 
