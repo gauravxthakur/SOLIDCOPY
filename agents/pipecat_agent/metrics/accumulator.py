@@ -9,9 +9,10 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import json
 import math
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 import uuid
 
 from metrics.types import (
@@ -739,3 +740,148 @@ class SessionMetricsAccumulator:
             tool_latency_seconds=[call.latency_seconds for call in tool_calls],
             tool_calls=tool_calls,
         )
+
+
+# ---------------------------------------------------------------------------
+# Human-Readable Formatting & Shutdown Guard
+# ---------------------------------------------------------------------------
+
+
+def _fmt_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "n/a"
+    total = int(round(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _fmt_num(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    if isinstance(value, float):
+        return f"{value:,.2f}" if abs(value) >= 10 else f"{value:.3f}".rstrip("0").rstrip(".")
+    if isinstance(value, int):
+        return f"{value:,}"
+    return str(value)
+
+
+def _avg(stats: Any) -> Any:
+    if isinstance(stats, dict):
+        return stats.get("average")
+    if hasattr(stats, "average"):
+        return stats.average
+    return None
+
+
+def _total(stats: Any) -> Any:
+    if isinstance(stats, dict):
+        return stats.get("total")
+    if hasattr(stats, "total"):
+        return stats.total
+    return None
+
+
+def format_summary(summary: dict[str, Any] | SessionSummary) -> str:
+    """Return a compact, readable representation of a Pipecat session summary."""
+    if hasattr(summary, "__dataclass_fields__"):
+        data = session_summary_to_dict(summary)
+    else:
+        data = summary
+
+    session = data.get("session", {})
+    events = data.get("events", {})
+    llm = data.get("llm", {})
+    tts = data.get("tts", {})
+    stt = data.get("stt", {})
+    turns = data.get("turns", {})
+    tools = data.get("tools", {})
+    runtime = data.get("runtime", {})
+    startup = runtime.get("startup", {})
+
+    lines = [
+        "SESSION METRICS SUMMARY",
+        f"Session ID: {session.get('session_id') or 'unknown'}",
+        f"Session duration: {_fmt_duration(session.get('duration_seconds'))}",
+        f"Metric events: {_fmt_num(events.get('metric_event_count'))}",
+        "",
+        "LLM",
+        f"  Requests: {_fmt_num(llm.get('request_count'))}",
+        f"  Prompt tokens: {_fmt_num(llm.get('prompt_tokens'))}",
+        f"  Cached prompt tokens: {_fmt_num(llm.get('cached_prompt_tokens'))}",
+        f"  Completion tokens: {_fmt_num(llm.get('completion_tokens'))}",
+        f"  Total tokens: {_fmt_num(llm.get('total_tokens'))}",
+        f"  Average TTFB: {_fmt_num(_avg(llm.get('ttfb_seconds')))} s",
+        f"  Average TTFAT: {_fmt_num(_avg(llm.get('ttfat_seconds')))} s",
+        "",
+        "TTS",
+        f"  Requests: {_fmt_num(tts.get('request_count'))}",
+        f"  Total characters: {_fmt_num(tts.get('characters'))}",
+        f"  Average TTFB: {_fmt_num(_avg(tts.get('ttfb_seconds')))} s",
+        f"  Average TTFA: {_fmt_num(_avg(tts.get('ttfa_seconds')))} s",
+        "",
+        "STT",
+        f"  Metric events: {_fmt_num(stt.get('metric_event_count'))}",
+        f"  User utterances: {_fmt_num(stt.get('utterance_count'))}",
+        f"  Total audio: {_fmt_num(_total(stt.get('audio_duration_seconds')))} s",
+        "",
+        "TURNS",
+        f"  Turns: {_fmt_num(turns.get('count'))}",
+        f"  Completed: {_fmt_num(turns.get('completed_count'))}",
+        f"  Interrupted: {_fmt_num(turns.get('interrupted_count'))}",
+        f"  Interruption rate: {_fmt_num(turns.get('interruption_rate_percentage'))} %"
+        if turns.get("interruption_rate_percentage") is not None
+        else "  Interruption rate: n/a",
+        f"  Average user→bot latency: {_fmt_num(_avg(turns.get('user_bot_latency_seconds')))} s",
+        f"  First bot speech latency: {_fmt_num(turns.get('first_bot_speech_latency_seconds'))} s",
+        "",
+        "TOOLS",
+        f"  Total calls: {_fmt_num(tools.get('count'))}",
+        f"  Successful: {_fmt_num(tools.get('successful_count'))}",
+        f"  Failed: {_fmt_num(tools.get('failed_count'))}",
+        f"  Cancelled: {_fmt_num(tools.get('cancelled_count'))}",
+    ]
+    for name, count in (tools.get("by_name") or {}).items():
+        lines.append(f"    {name}: {_fmt_num(count)}")
+
+    startup_dur = startup.get("total_duration_secs")
+    if startup_dur is not None or runtime.get("client_connected_secs") is not None:
+        lines.extend(
+            [
+                "",
+                "RUNTIME / STARTUP",
+                f"  Startup duration: {_fmt_num(startup_dur)} s",
+                f"  Client connection: {_fmt_num(runtime.get('client_connected_secs'))} s",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+class SummaryLogger:
+    """Once-only summary emitter to guard against duplicate/re-entrant shutdown calls."""
+
+    def __init__(
+        self,
+        accumulator: SessionMetricsAccumulator,
+        log_fn: Callable[[str], None] | None = None,
+    ) -> None:
+        self.accumulator = accumulator
+        self.log_fn = log_fn
+        self._emitted = False
+
+    def emit(self, reason: str = "shutdown") -> bool:
+        """Emit formatted human-readable summary and JSON summary once."""
+        if self._emitted:
+            return False
+        self._emitted = True
+        summary_dict = self.accumulator.summary_dict()
+        formatted = format_summary(summary_dict)
+        if self.log_fn is not None:
+            self.log_fn(f"\n{formatted}")
+            self.log_fn(f"Session metrics JSON: {json.dumps(summary_dict)}")
+        return True
+
+    @property
+    def emitted(self) -> bool:
+        return self._emitted

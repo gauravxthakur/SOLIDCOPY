@@ -7,6 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from metrics.accumulator import (
     RunningStats,
     SessionMetricsAccumulator,
+    SummaryLogger,
+    format_summary,
     generate_session_id,
 )
 from metrics.types import SESSION_SUMMARY_TOP_LEVEL_KEYS, session_summary_to_dict
@@ -553,6 +555,181 @@ class SessionMetricsAccumulatorTests(unittest.TestCase):
         self.assertEqual(tuple(as_dict.keys()), SESSION_SUMMARY_TOP_LEVEL_KEYS)
         self.assertEqual(as_dict["llm"]["ttfb_seconds"]["count"], 0)
         self.assertIsNone(as_dict["llm"]["ttfb_seconds"]["average"])
+
+
+class FormatSummaryTests(unittest.TestCase):
+    def _empty_acc(self) -> SessionMetricsAccumulator:
+        return SessionMetricsAccumulator(session_id="test-empty-session")
+
+    def test_format_empty_session_has_header(self):
+        acc = self._empty_acc()
+        out = format_summary(acc.summary())
+        self.assertIn("SESSION METRICS SUMMARY", out)
+
+    def test_format_empty_session_contains_required_sections(self):
+        acc = self._empty_acc()
+        out = format_summary(acc.summary())
+        for section in ("LLM", "TTS", "STT", "TURNS", "TOOLS"):
+            self.assertIn(section, out, msg=f"Missing section: {section}")
+
+    def test_format_empty_session_shows_na_for_numeric_fields(self):
+        acc = self._empty_acc()
+        out = format_summary(acc.summary())
+        # With no data, average stats should render as "n/a"
+        self.assertIn("n/a", out)
+
+    def test_format_empty_session_shows_session_id(self):
+        acc = self._empty_acc()
+        out = format_summary(acc.summary())
+        self.assertIn("test-empty-session", out)
+
+    def test_format_accepts_dataclass(self):
+        acc = self._empty_acc()
+        out = format_summary(acc.summary())  # summary() returns SessionSummary dataclass
+        self.assertIsInstance(out, str)
+        self.assertGreater(len(out), 0)
+
+    def test_format_accepts_dict(self):
+        acc = self._empty_acc()
+        out = format_summary(acc.summary_dict())  # summary_dict() returns plain dict
+        self.assertIsInstance(out, str)
+        self.assertIn("SESSION METRICS SUMMARY", out)
+
+    def test_format_populated_session_shows_llm_values(self):
+        acc = SessionMetricsAccumulator(session_id="test-populated")
+        acc.collect({
+            "kind": "llm",
+            "processor": "OpenAILLMService",
+            "model": "gpt-4o",
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+            "cache_read_input_tokens": 0,
+        })
+        out = format_summary(acc.summary())
+        # prompt tokens, completion tokens, and total tokens should appear
+        self.assertIn("150", out)  # total tokens
+        self.assertIn("100", out)  # prompt tokens
+        self.assertIn("50", out)   # completion tokens
+
+    def test_format_populated_session_shows_tts_values(self):
+        acc = SessionMetricsAccumulator(session_id="test-tts")
+        acc.collect({
+            "kind": "tts",
+            "processor": "CartesiaTTSService",
+            "model": "sonic",
+            "characters": 300,
+        })
+        out = format_summary(acc.summary())
+        self.assertIn("300", out)
+
+    def test_format_populated_session_shows_stt_event_count(self):
+        acc = SessionMetricsAccumulator(session_id="test-stt")
+        acc.collect({
+            "kind": "stt",
+            "processor": "DeepgramSTTService",
+            "model": "nova",
+            "audio_seconds": 5.0,
+        })
+        out = format_summary(acc.summary())
+        self.assertIn("STT", out)
+
+    def test_format_populated_session_shows_turn_counts(self):
+        acc = SessionMetricsAccumulator(session_id="test-turns")
+        acc.note_turn_started(1)
+        acc.note_turn_ended({
+            "turn_count": 1,
+            "duration_secs": 2.0,
+            "was_interrupted": False,
+            "status": "completed",
+        })
+        acc.note_turn_started(2)
+        acc.note_turn_ended({
+            "turn_count": 2,
+            "duration_secs": 0.5,
+            "was_interrupted": True,
+            "status": "interrupted",
+        })
+        out = format_summary(acc.summary())
+        self.assertIn("TURNS", out)
+        # 2 total turns should appear somewhere in the output
+        self.assertIn("2", out)
+
+    def test_format_no_cost_or_credit_sections(self):
+        """Branch 1: format_summary must NOT include cost or credit sections."""
+        acc = self._empty_acc()
+        out = format_summary(acc.summary())
+        self.assertNotIn("cost", out.lower())
+        self.assertNotIn("credit", out.lower())
+        self.assertNotIn("revenue", out.lower())
+
+
+class SummaryLoggerTests(unittest.TestCase):
+    def _make_logger(self, log_fn=None):
+        acc = SessionMetricsAccumulator(session_id="logger-test")
+        return SummaryLogger(acc, log_fn=log_fn)
+
+    def test_emitted_property_starts_false(self):
+        logger = self._make_logger()
+        self.assertFalse(logger.emitted)
+
+    def test_emit_returns_true_on_first_call(self):
+        logger = self._make_logger()
+        result = logger.emit(reason="test")
+        self.assertTrue(result)
+
+    def test_emitted_property_true_after_emit(self):
+        logger = self._make_logger()
+        logger.emit(reason="test")
+        self.assertTrue(logger.emitted)
+
+    def test_emit_returns_false_on_second_call(self):
+        logger = self._make_logger()
+        logger.emit(reason="first")
+        result = logger.emit(reason="second")
+        self.assertFalse(result)
+
+    def test_emit_does_not_call_log_fn_twice(self):
+        calls = []
+        logger = self._make_logger(log_fn=lambda msg: calls.append(msg))
+        logger.emit(reason="first")
+        logger.emit(reason="second")
+        # log_fn is called twice per emit (formatted + JSON), so after 1 emit → 2 calls;
+        # after 2 emit attempts → still 2 calls (once-only guard)
+        self.assertEqual(len(calls), 2)
+
+    def test_emit_with_no_log_fn_does_not_raise(self):
+        logger = self._make_logger(log_fn=None)
+        try:
+            result = logger.emit(reason="test")
+            self.assertTrue(result)
+        except Exception as exc:
+            self.fail(f"emit() raised with log_fn=None: {exc}")
+
+    def test_emit_log_fn_receives_formatted_summary(self):
+        messages = []
+        logger = self._make_logger(log_fn=lambda msg: messages.append(msg))
+        logger.emit(reason="test")
+        combined = "\n".join(messages)
+        self.assertIn("SESSION METRICS SUMMARY", combined)
+
+    def test_emit_log_fn_receives_json(self):
+        import json as _json
+        messages = []
+        logger = self._make_logger(log_fn=lambda msg: messages.append(msg))
+        logger.emit(reason="test")
+        json_msg = next((m for m in messages if "Session metrics JSON:" in m), None)
+        self.assertIsNotNone(json_msg, "No JSON log message found")
+        json_str = json_msg.split("Session metrics JSON:", 1)[1].strip()
+        parsed = _json.loads(json_str)
+        self.assertIn("session", parsed)
+        self.assertIn("llm", parsed)
+
+    def test_third_emit_still_returns_false(self):
+        logger = self._make_logger()
+        logger.emit()
+        logger.emit()
+        self.assertFalse(logger.emit())
 
 
 if __name__ == "__main__":
