@@ -226,17 +226,19 @@ def transcription_to_dict(frame: TranscriptionFrame) -> dict[str, Any]:
     }
 
 
-def setup_observers():
+def setup_observers(accumulator: Any | None = None):
     """Set up observers for startup, service metrics, latency, and turns.
 
-    Returns a list of observers for ``PipelineWorker``. Handlers currently log;
-    mapping helpers define the stable field contract for later recorder wiring.
+    Returns a list of observers for ``PipelineWorker``. When ``accumulator``
+    is provided, observer events are automatically dispatched to the recorder.
     """
     startup_observer = StartupTimingObserver()
 
     @startup_observer.event_handler("on_startup_timing_report")
     async def on_startup_timing_report(observer, report):
         payload = startup_report_to_dict(report)
+        if accumulator is not None:
+            accumulator.note_startup(payload)
         logger.info(f"Total startup duration: {payload['total_duration_secs']:.3f}s")
         for timing in payload["processor_timings"]:
             logger.info(f"  {timing['processor_name']}: {timing['duration_secs']:.3f}s")
@@ -244,6 +246,8 @@ def setup_observers():
     @startup_observer.event_handler("on_transport_timing_report")
     async def on_transport_timing_report(observer, report):
         payload = transport_report_to_dict(report)
+        if accumulator is not None:
+            accumulator.note_transport(payload)
         if payload["client_connected_secs"] is not None:
             logger.info(f"Client connection time: {payload['client_connected_secs']:.3f}s")
 
@@ -252,6 +256,8 @@ def setup_observers():
     @service_observer.event_handler("on_service_latency")
     async def on_service_latency(observer, record):
         payload = latency_record_to_dict(record)
+        if accumulator is not None:
+            accumulator.note_service_latency(payload)
         logger.info(
             f"Service Latency [{payload['processor']}]: "
             f"{payload['kind']} = {payload['seconds']:.3f}s"
@@ -260,6 +266,8 @@ def setup_observers():
     @service_observer.event_handler("on_service_usage")
     async def on_service_usage(observer, record):
         payload = usage_record_to_dict(record)
+        if accumulator is not None:
+            accumulator.note_service_usage(payload)
         if payload["kind"] == "llm":
             logger.info(
                 f"LLM Token Usage [{payload['processor']}]: "
@@ -278,17 +286,35 @@ def setup_observers():
     @latency_observer.event_handler("on_latency_measured")
     async def on_latency_measured(observer, latency_seconds):
         payload = latency_measured_to_dict(latency_seconds)
+        if accumulator is not None:
+            accumulator.note_user_bot_latency(payload)
         logger.info(f"User-to-bot latency: {payload['latency_seconds']:.3f}s")
+
+    @latency_observer.event_handler("on_first_bot_speech_latency")
+    async def on_first_bot_speech_latency(observer, latency_seconds):
+        if accumulator is not None:
+            accumulator.note_first_bot_speech_latency(latency_seconds)
+        logger.info(f"First bot speech latency: {latency_seconds:.3f}s")
+
+    @latency_observer.event_handler("on_latency_breakdown")
+    async def on_latency_breakdown(observer, breakdown):
+        payload = latency_breakdown_to_dict(breakdown)
+        if accumulator is not None:
+            accumulator.note_latency_breakdown(payload)
 
     turn_observer = TurnTrackingObserver(turn_end_timeout_secs=2.5)
 
     @turn_observer.event_handler("on_turn_started")
     async def on_turn_started(observer, turn_count):
+        if accumulator is not None:
+            accumulator.note_turn_started(turn_count)
         logger.info(f"Turn {turn_count} started")
 
     @turn_observer.event_handler("on_turn_ended")
     async def on_turn_ended(observer, turn_count, duration, was_interrupted):
         payload = turn_ended_to_dict(turn_count, duration, was_interrupted)
+        if accumulator is not None:
+            accumulator.note_turn_ended(payload)
         logger.info(
             f"Turn {payload['turn_count']} {payload['status']} "
             f"after {payload['duration_secs']:.2f}s"

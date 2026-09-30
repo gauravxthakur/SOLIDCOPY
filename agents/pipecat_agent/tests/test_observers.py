@@ -40,6 +40,7 @@ from pipecat.observers.startup_timing_observer import (
 from pipecat.observers.turn_tracking_observer import TurnTrackingObserver
 from pipecat.observers.user_bot_latency_observer import UserBotLatencyObserver
 
+from metrics.accumulator import SessionMetricsAccumulator
 from metrics.observers import (
     latency_breakdown_to_dict,
     latency_measured_to_dict,
@@ -57,7 +58,7 @@ from metrics.observers import (
 from tests.helpers import ControllableClock, push_frame
 
 
-class SetupObserversTests(unittest.TestCase):
+class SetupObserversTests(unittest.IsolatedAsyncioTestCase):
     def test_returns_expected_observer_types_in_order(self):
         observers = setup_observers()
         self.assertEqual(len(observers), 4)
@@ -65,6 +66,30 @@ class SetupObserversTests(unittest.TestCase):
         self.assertIsInstance(observers[1], UserBotLatencyObserver)
         self.assertIsInstance(observers[2], TurnTrackingObserver)
         self.assertIsInstance(observers[3], ServiceMetricsObserver)
+
+    async def test_wires_accumulator_and_dispatches_events(self):
+        acc = SessionMetricsAccumulator(session_id="wired-session")
+        observers = setup_observers(acc)
+        service_obs = observers[3]
+        turn_obs = observers[2]
+
+        # Push metrics frame to service_obs
+        frame = MetricsFrame(
+            data=[
+                TTSUsageMetricsData(processor="CartesiaTTSService", model="cartesia", value=25),
+                TTFBMetricsData(processor="CartesiaTTSService", model="cartesia", value=0.15),
+            ]
+        )
+        await push_frame(service_obs, frame)
+
+        # Push turn start and end to turn_obs
+        await push_frame(turn_obs, StartFrame())
+        await push_frame(turn_obs, BotStartedSpeakingFrame())
+        await push_frame(turn_obs, BotStoppedSpeakingFrame())
+
+        summary = acc.summary()
+        self.assertEqual(summary.tts.characters, 25)
+        self.assertEqual(summary.tts.ttfb_seconds.count, 1)
 
 
 class ServiceMetricsObserverTests(unittest.IsolatedAsyncioTestCase):
