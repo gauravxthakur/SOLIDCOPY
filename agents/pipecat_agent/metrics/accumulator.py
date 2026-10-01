@@ -1035,16 +1035,18 @@ class SummaryLogger:
         accumulator: SessionMetricsAccumulator,
         log_fn: Callable[[str], None] | None = None,
         persist_dir: Path | str | None = None,
+        langfuse_tracer: Any | None = None,
     ) -> None:
         self.accumulator = accumulator
         self.log_fn = log_fn
         self.persist_dir = persist_dir
+        self.langfuse_tracer = langfuse_tracer
         self._emitted = False
 
     def emit(
         self, reason: str = "shutdown", directory: Path | str | None = None
     ) -> bool:
-        """Emit formatted human-readable summary and JSON summary once."""
+        """Emit formatted human-readable summary, JSON summary, and flush Langfuse traces once."""
         if self._emitted:
             return False
         self._emitted = True
@@ -1059,6 +1061,15 @@ class SummaryLogger:
         except Exception as err:
             persist_err = err
 
+        langfuse_flushed: bool | None = None
+        langfuse_err: Exception | None = None
+        if self.langfuse_tracer is not None:
+            try:
+                langfuse_flushed = self.langfuse_tracer.flush()
+            except Exception as err:
+                langfuse_err = err
+                langfuse_flushed = False
+
         if self.log_fn is not None:
             self.log_fn(f"\n{formatted}")
             self.log_fn(f"Session metrics JSON: {json.dumps(summary_dict)}")
@@ -1066,6 +1077,14 @@ class SummaryLogger:
                 self.log_fn(f"Session metrics saved: {saved_path}")
             elif persist_err is not None:
                 self.log_fn(f"Failed to persist session metrics summary: {persist_err}")
+
+            if self.langfuse_tracer is not None:
+                if langfuse_err is not None:
+                    self.log_fn(f"Failed to flush Langfuse traces: {langfuse_err}")
+                elif langfuse_flushed is False:
+                    self.log_fn("Failed to flush Langfuse traces.")
+                else:
+                    self.log_fn("Langfuse traces flushed successfully.")
 
         return True
 

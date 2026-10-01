@@ -32,6 +32,7 @@ from metrics.accumulator import (
     format_summary,
     generate_session_id,
 )
+from metrics.langfuse import setup_langfuse
 from metrics.observers import setup_observers
 
 
@@ -83,14 +84,22 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     
     session_id = os.getenv("SESSION_ID") or generate_session_id(prefix="webrtc")
+    langfuse_tracer = setup_langfuse(
+        session_id=session_id,
+        metadata={"session_id": session_id},
+    )
     accumulator = SessionMetricsAccumulator(
         session_id=session_id,
         llm_model="gemini-2.5-flash",
         stt_model="deepgram",
         tts_model="cartesia",
     )
-    summary_logger = SummaryLogger(accumulator, log_fn=logger.info)
-    observers = setup_observers(accumulator)
+    summary_logger = SummaryLogger(
+        accumulator,
+        log_fn=logger.info,
+        langfuse_tracer=langfuse_tracer,
+    )
+    observers = setup_observers(accumulator, session_id=session_id)
         
     
     pipeline = Pipeline(

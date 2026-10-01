@@ -667,9 +667,17 @@ class FormatSummaryTests(unittest.TestCase):
 
 
 class SummaryLoggerTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.persist_dir = Path(self.tmp_dir.name)
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
     def _make_logger(self, log_fn=None):
         acc = SessionMetricsAccumulator(session_id="logger-test")
-        return SummaryLogger(acc, log_fn=log_fn)
+        return SummaryLogger(acc, log_fn=log_fn, persist_dir=self.persist_dir)
 
     def test_emitted_property_starts_false(self):
         logger = self._make_logger()

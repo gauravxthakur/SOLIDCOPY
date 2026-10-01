@@ -230,12 +230,14 @@ def transcription_to_dict(frame: TranscriptionFrame) -> dict[str, Any]:
 def setup_observers(
     accumulator: Any | None = None,
     on_checkpoint: Any | None = None,
+    session_id: str | None = None,
 ):
-    """Set up observers for startup, service metrics, latency, and turns.
+    """Set up observers for startup, service metrics, latency, turns, and optional tracing.
 
     Returns a list of observers for ``PipelineWorker``. When ``accumulator``
     is provided, observer events are automatically dispatched to the recorder.
     When ``on_checkpoint`` is provided, it is invoked on each completed turn.
+    When tracing is available, attaches ``TurnTraceObserver`` using the consistent ``session_id``.
     """
     startup_observer = StartupTimingObserver()
 
@@ -333,4 +335,29 @@ def setup_observers(
             f"after {payload['duration_secs']:.2f}s"
         )
 
-    return [startup_observer, latency_observer, turn_observer, service_observer]
+    observers: list[Any] = [startup_observer, latency_observer, turn_observer, service_observer]
+    try:
+        from pipecat.utils.tracing.setup import is_tracing_available
+        from pipecat.utils.tracing.turn_trace_observer import TurnTraceObserver
+
+        if is_tracing_available():
+            effective_sid = session_id or (getattr(accumulator, "session_id", None) if accumulator else None)
+            span_attrs = (
+                {
+                    "session_id": effective_sid,
+                    "langfuse.session.id": effective_sid,
+                }
+                if effective_sid
+                else None
+            )
+            trace_observer = TurnTraceObserver(
+                turn_tracker=turn_observer,
+                latency_tracker=latency_observer,
+                conversation_id=effective_sid,
+                additional_span_attributes=span_attrs,
+            )
+            observers.append(trace_observer)
+    except Exception as exc:
+        logger.warning(f"Could not initialize TurnTraceObserver: {exc}")
+
+    return observers
