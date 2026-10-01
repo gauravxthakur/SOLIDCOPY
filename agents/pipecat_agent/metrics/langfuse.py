@@ -92,6 +92,11 @@ class LangfuseTracer:
         self.client = client
         self.tracer_provider = tracer_provider
 
+    @property
+    def session_id(self) -> str | None:
+        """Return configured session_id."""
+        return self.config.session_id
+
     def flush(self) -> bool:
         """Flush pending spans/events to Langfuse."""
         success = True

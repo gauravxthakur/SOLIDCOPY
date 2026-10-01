@@ -212,6 +212,120 @@ class SetupLangfuseTests(unittest.TestCase):
             self.assertIn("langfuse", str(ctx.exception))
 
 
+class Step17SessionIdentityAndShutdownFlushTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from metrics.accumulator import SessionMetricsAccumulator, SummaryLogger
+        self.SessionMetricsAccumulator = SessionMetricsAccumulator
+        self.SummaryLogger = SummaryLogger
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.persist_dir = Path(self.tmp_dir.name)
+
+    def tearDown(self):
+        self.tmp_dir.cleanup()
+
+    def test_tracer_session_id_property(self):
+        cfg = LangfuseConfig(public_key="pk", secret_key="sk", base_url="url", session_id="test-sess-123")
+        tracer = LangfuseTracer(config=cfg)
+        self.assertEqual(tracer.session_id, "test-sess-123")
+
+    def test_session_identity_consistency(self):
+        session_id = "test-session-xyz"
+        mock_module = MagicMock()
+        with patch.dict("sys.modules", {"langfuse": mock_module}):
+            tracer = setup_langfuse(
+                session_id=session_id,
+                public_key="pk",
+                secret_key="sk",
+                base_url="url",
+            )
+            self.assertIsNotNone(tracer)
+            self.assertEqual(tracer.session_id, session_id)
+
+            acc = self.SessionMetricsAccumulator(session_id=session_id)
+            self.assertEqual(acc.session_id, session_id)
+
+            from metrics.observers import setup_observers
+            observers = setup_observers(acc, session_id=session_id)
+            self.assertGreaterEqual(len(observers), 4)
+
+    def test_summary_logger_flushes_langfuse_successfully(self):
+        acc = self.SessionMetricsAccumulator(session_id="flush-test")
+        mock_tracer = MagicMock()
+        mock_tracer.flush.return_value = True
+
+        messages = []
+        logger = self.SummaryLogger(
+            accumulator=acc,
+            log_fn=lambda msg: messages.append(msg),
+            persist_dir=self.persist_dir,
+            langfuse_tracer=mock_tracer,
+        )
+
+        res = logger.emit(reason="shutdown")
+        self.assertTrue(res)
+        mock_tracer.flush.assert_called_once()
+        success_msg = next((m for m in messages if "Langfuse traces flushed successfully." in m), None)
+        self.assertIsNotNone(success_msg, "Success message not logged")
+
+    def test_summary_logger_logs_flush_failure_boolean(self):
+        acc = self.SessionMetricsAccumulator(session_id="flush-fail-test")
+        mock_tracer = MagicMock()
+        mock_tracer.flush.return_value = False
+
+        messages = []
+        logger = self.SummaryLogger(
+            accumulator=acc,
+            log_fn=lambda msg: messages.append(msg),
+            persist_dir=self.persist_dir,
+            langfuse_tracer=mock_tracer,
+        )
+
+        res = logger.emit(reason="shutdown")
+        self.assertTrue(res)
+        mock_tracer.flush.assert_called_once()
+        fail_msg = next((m for m in messages if "Failed to flush Langfuse traces." in m), None)
+        self.assertIsNotNone(fail_msg, "Failure message not logged")
+
+    def test_summary_logger_logs_flush_failure_exception(self):
+        acc = self.SessionMetricsAccumulator(session_id="flush-exc-test")
+        mock_tracer = MagicMock()
+        mock_tracer.flush.side_effect = RuntimeError("Connection timeout")
+
+        messages = []
+        logger = self.SummaryLogger(
+            accumulator=acc,
+            log_fn=lambda msg: messages.append(msg),
+            persist_dir=self.persist_dir,
+            langfuse_tracer=mock_tracer,
+        )
+
+        res = logger.emit(reason="shutdown")
+        self.assertTrue(res)
+        mock_tracer.flush.assert_called_once()
+        fail_msg = next((m for m in messages if "Failed to flush Langfuse traces: Connection timeout" in m), None)
+        self.assertIsNotNone(fail_msg, "Exception message not logged")
+
+    def test_summary_logger_once_only_guard_prevents_duplicate_flush(self):
+        acc = self.SessionMetricsAccumulator(session_id="guard-test")
+        mock_tracer = MagicMock()
+        mock_tracer.flush.return_value = True
+
+        messages = []
+        logger = self.SummaryLogger(
+            accumulator=acc,
+            log_fn=lambda msg: messages.append(msg),
+            persist_dir=self.persist_dir,
+            langfuse_tracer=mock_tracer,
+        )
+
+        first = logger.emit(reason="client_disconnected")
+        second = logger.emit(reason="shutdown")
+        self.assertTrue(first)
+        self.assertFalse(second)
+        mock_tracer.flush.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
 
